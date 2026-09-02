@@ -148,7 +148,7 @@ func runMain(args []string, in io.Reader, out, errOut io.Writer) int {
 		MaxUndoStack:       cfg.MaxUndoStack,
 		Instructions:       instructions,
 		Progress:           out,
-		PreToolHook:        preToolHook(cfg.PreToolHook),
+		PreToolHook:        preToolHook(trustedPreToolHook(cfg.PreToolHook, path, errOut)),
 	}
 	autoApprove := cfg.AutoApprovePatches || f.yes
 	switch {
@@ -208,6 +208,27 @@ func newClient(cfg config.Config, streamed bool, out io.Writer) agent.Chatter {
 		}
 		return ollama.NewClient(cfg.Endpoint, cfg.Model, opts)
 	}
+}
+
+// trustProjectHookEnv opts in to honoring pre_tool_hook when it came from the
+// project-local .metron.json -- a file that may have arrived inside a cloned
+// repository, not something the operator necessarily wrote themselves.
+const trustProjectHookEnv = "METRON_TRUST_PROJECT_HOOK"
+
+// trustedPreToolHook returns cmdline unchanged, unless it was sourced from the
+// project-local config file and the operator has not opted in to trusting
+// that file's hooks -- in which case it is refused with a warning rather than
+// silently run. Without this gate, a repository's own .metron.json could run
+// arbitrary shell commands with the operator's privileges the moment metron
+// is started in it, before any approval prompt exists to stop it.
+func trustedPreToolHook(cmdline, path string, errOut io.Writer) string {
+	if cmdline == "" || !config.IsProjectFile(path) || os.Getenv(trustProjectHookEnv) != "" {
+		return cmdline
+	}
+	fmt.Fprintf(errOut, "\033[33mwarning: ignoring pre_tool_hook from %s -- it came from the project "+
+		"directory and may not be trustworthy (e.g. a cloned repository). Move it to your user config "+
+		"instead, or set %s=1 if you trust this project.\033[0m\n", path, trustProjectHookEnv)
+	return ""
 }
 
 // preToolHook wraps the configured shell command as an agent.Options

@@ -274,6 +274,23 @@ func TestSearchOrder(t *testing.T) {
 	})
 }
 
+func TestIsProjectFile(t *testing.T) {
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{ProjectFile, true},
+		{"/home/me/.config/metron/config.json", false},
+		{"/somewhere/custom.json", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		if got := IsProjectFile(tc.path); got != tc.want {
+			t.Errorf("IsProjectFile(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}
+
 func TestLoadInstructionsMissingFileIsNotAnError(t *testing.T) {
 	dir := t.TempDir()
 

@@ -582,6 +582,93 @@ func TestRunMainWiresThePatchApprovalPrompt(t *testing.T) {
 	}
 }
 
+func TestTrustedPreToolHookRefusesAnUntrustedProjectFile(t *testing.T) {
+	var errOut bytes.Buffer
+
+	got := trustedPreToolHook("echo hi", config.ProjectFile, &errOut)
+
+	if got != "" {
+		t.Fatalf("cmdline = %q, want the project-sourced hook refused", got)
+	}
+	if !strings.Contains(errOut.String(), "ignoring pre_tool_hook") {
+		t.Fatalf("stderr = %q, want a warning explaining the refusal", errOut.String())
+	}
+}
+
+func TestTrustedPreToolHookAllowsAnOptedInProjectFile(t *testing.T) {
+	t.Setenv(trustProjectHookEnv, "1")
+	var errOut bytes.Buffer
+
+	got := trustedPreToolHook("echo hi", config.ProjectFile, &errOut)
+
+	if got != "echo hi" {
+		t.Fatalf("cmdline = %q, want the hook honored once trusted", got)
+	}
+	if errOut.String() != "" {
+		t.Fatalf("stderr = %q, want no warning once opted in", errOut.String())
+	}
+}
+
+func TestTrustedPreToolHookAllowsTheUserLevelConfig(t *testing.T) {
+	var errOut bytes.Buffer
+
+	got := trustedPreToolHook("echo hi", "/home/me/.config/metron/config.json", &errOut)
+
+	if got != "echo hi" {
+		t.Fatalf("cmdline = %q, want a user-config hook honored without opt-in", got)
+	}
+	if errOut.String() != "" {
+		t.Fatalf("stderr = %q, want no warning for a trusted source", errOut.String())
+	}
+}
+
+func TestTrustedPreToolHookIgnoresEmptyConfiguration(t *testing.T) {
+	var errOut bytes.Buffer
+
+	got := trustedPreToolHook("", config.ProjectFile, &errOut)
+
+	if got != "" || errOut.String() != "" {
+		t.Fatalf("got %q, %q, want no-op when no hook is configured", got, errOut.String())
+	}
+}
+
+// TestRunMainRefusesAProjectHookWithoutOptIn is the end-to-end check: a
+// pre_tool_hook shipped in ./.metron.json must not run just because a repo
+// was cloned and metron started in it.
+func TestRunMainRefusesAProjectHookWithoutOptIn(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	t.Setenv("METRON_CONFIG", "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv(trustProjectHookEnv, "")
+
+	marker := filepath.Join(dir, "hook-ran")
+	hookCfg := fmt.Sprintf(`{"pre_tool_hook":"touch %s"}`, marker)
+	if err := os.WriteFile(filepath.Join(dir, config.ProjectFile), []byte(hookCfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"message":{"role":"assistant","content":"listing"},"done":true}`))
+	}))
+	defer srv.Close()
+	t.Setenv("OLLAMA_HOST", srv.URL+"/api/chat")
+	t.Setenv("OLLAMA_MODEL", "hook-model")
+
+	var out, errOut bytes.Buffer
+	code := runMain(nil, strings.NewReader("exit\n"), &out, &errOut)
+
+	if code != 0 {
+		t.Fatalf("runMain() = %d, want 0", code)
+	}
+	if !strings.Contains(errOut.String(), "ignoring pre_tool_hook") {
+		t.Fatalf("stderr = %q, want the refusal warning", errOut.String())
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatal("hook marker file exists, want the untrusted project hook never to have run")
+	}
+}
+
 func mustJSONMain(t *testing.T, v any) string {
 	t.Helper()
 	b, err := json.Marshal(v)

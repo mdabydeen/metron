@@ -197,6 +197,13 @@ Plan mode (below) is checked first and unconditionally, so a hook can never re-a
 plan mode refused. This runs arbitrary shell code with your permissions on every tool call —
 the same "work on a clean branch" caution `apply_patch` already carries applies here too.
 
+**A `pre_tool_hook` set in the project-local `./.metron.json` is refused by default.** That file
+can arrive inside a repository you cloned, not just one you wrote yourself, so metron will not run
+a hook sourced from it until you either move the setting to your user config
+(`~/.config/metron/config.json`) or explicitly opt in with `METRON_TRUST_PROJECT_HOOK=1` for
+repositories you trust. A `pre_tool_hook` in the user config always runs, since that file is
+yours.
+
 ### Interrupting a reply
 
 A big local model can spend minutes on one answer. Ctrl-C during a reply cancels that turn and

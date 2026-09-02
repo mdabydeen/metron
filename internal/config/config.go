@@ -90,6 +90,17 @@ func Defaults() Config {
 // ProjectFile is the config file metron looks for in the working directory.
 const ProjectFile = ".metron.json"
 
+// IsProjectFile reports whether path is the project-local config file found
+// by searching the working directory, as opposed to the user-level config or
+// an explicit $METRON_CONFIG override. A repository's own .metron.json is
+// not something the operator necessarily wrote or reviewed -- cloning an
+// untrusted repo and running metron in it loads whatever that file contains
+// with no prompt -- so callers use this to require extra confirmation before
+// honoring security-sensitive keys (pre_tool_hook) sourced from it.
+func IsProjectFile(path string) bool {
+	return path == ProjectFile
+}
+
 // Search returns the config file paths metron consults, highest priority
 // first. An explicit path (from METRON_CONFIG) short-circuits the search.
 func Search() []string {
