@@ -208,6 +208,8 @@ func TestValidate(t *testing.T) {
 		{"negative num_ctx", func(c *Config) { c.NumCtx = -1 }, "num_ctx must be > 0"},
 		{"zero max turns", func(c *Config) { c.MaxTurns = 0 }, "max_turns must be > 0"},
 		{"zero compaction", func(c *Config) { c.CompactThreshold = 0 }, "compact_threshold_bytes must be > 0"},
+		{"invalid provider", func(c *Config) { c.Provider = "anthropic" }, `provider must be "ollama" or "openai"`},
+		{"empty provider", func(c *Config) { c.Provider = "" }, `provider must be "ollama" or "openai"`},
 		{"zero history budget", func(c *Config) { c.MaxHistoryMessages = 0 }, "max_history_messages must be > 0"},
 		{"zero slice budget", func(c *Config) { c.MaxSliceLines = 0 }, "max_slice_lines must be > 0"},
 		{"zero line budget", func(c *Config) { c.MaxLineChars = 0 }, "max_line_chars must be > 0"},

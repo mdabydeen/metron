@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,6 +18,7 @@ import (
 
 	"metron/internal/config"
 	"metron/internal/ollama"
+	"metron/internal/openai"
 )
 
 type fakeStepper struct {
@@ -1478,5 +1481,73 @@ func TestLoadCommandsReportsAnUnreadableDirectory(t *testing.T) {
 
 	if err == nil {
 		t.Fatal("loadCommands() error = nil, want the unreadable directory reported")
+	}
+}
+
+func TestNewClientSelectsOllamaByDefault(t *testing.T) {
+	cfg := config.Defaults()
+
+	client := newClient(cfg, false, io.Discard)
+
+	if _, ok := client.(*ollama.Client); !ok {
+		t.Fatalf("newClient() = %T, want *ollama.Client for provider %q", client, cfg.Provider)
+	}
+}
+
+func TestNewClientSelectsOpenAIWhenConfigured(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Provider = "openai"
+
+	client := newClient(cfg, false, io.Discard)
+
+	if _, ok := client.(*openai.Client); !ok {
+		t.Fatalf("newClient() = %T, want *openai.Client for provider %q", client, cfg.Provider)
+	}
+}
+
+func TestRunMainTalksToAnOpenAICompatibleServer(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"hi from openai-compatible"}}]}`)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	t.Chdir(dir)
+	cfgPath := filepath.Join(dir, "config.json")
+	cfgJSON, err := json.Marshal(map[string]any{
+		"provider": "openai",
+		"endpoint": srv.URL + "/v1/chat/completions",
+		"model":    "local-model",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfgPath, cfgJSON, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("METRON_CONFIG", cfgPath)
+
+	var out, errOut bytes.Buffer
+	code := runMain([]string{"-p", "hi"}, strings.NewReader(""), &out, &errOut)
+
+	if code != 0 {
+		t.Fatalf("runMain() = %d, want 0", code)
+	}
+	if gotPath != "/v1/chat/completions" {
+		t.Fatalf("request path = %q, want /v1/chat/completions", gotPath)
+	}
+	if out.String() != "hi from openai-compatible\n" {
+		t.Fatalf("stdout = %q, want the model's answer", out.String())
+	}
+}
+
+func TestNewClientWiresTheSinkWhenStreamed(t *testing.T) {
+	var buf bytes.Buffer
+	for _, provider := range []string{"ollama", "openai"} {
+		cfg := config.Defaults()
+		cfg.Provider = provider
+		newClient(cfg, true, &buf) // just confirm it doesn't panic wiring the sink through
 	}
 }

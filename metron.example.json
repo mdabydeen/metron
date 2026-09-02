@@ -1,6 +1,7 @@
 {
   "endpoint": "http://localhost:11434/api/chat",
   "model": "qwen2.5-coder:32b",
+  "provider": "ollama",
   "timeout_seconds": 180,
   "stream": true,
 

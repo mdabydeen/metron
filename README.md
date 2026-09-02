@@ -1,7 +1,9 @@
 # metron
 
-A minimal, terminal-based coding agent that talks to a **local** [Ollama](https://ollama.com)
-model. Its one defining constraint is **token discipline**: the model never reads a whole
+A minimal, terminal-based coding agent that talks to a **local** model server --
+[Ollama](https://ollama.com) by default, or any server speaking the OpenAI-compatible chat
+completions format (llama.cpp, vLLM, LM Studio). Its one defining constraint is
+**token discipline**: the model never reads a whole
 file. Every look at your code goes through a narrow, budgeted tool, and large tool output is
 purged from the conversation as soon as the turn that needed it is over.
 
@@ -45,9 +47,10 @@ the table. The tool surface is what makes that instruction enforceable rather th
 ## Requirements
 
 - **Go 1.26+** to build.
-- **A running Ollama server** with a **tool-capable** model pulled. Tool calling is not
-  optional here — without it the agent cannot see your code at all. Check with
-  `curl -s localhost:11434/api/tags | grep tools`.
+- **A running local model server** with a **tool-capable** model loaded. Tool calling is not
+  optional here — without it the agent cannot see your code at all. For Ollama (the default),
+  check with `curl -s localhost:11434/api/tags | grep tools`; for an OpenAI-compatible server
+  (llama.cpp, vLLM, LM Studio), check its own tool-calling documentation.
 - **[ripgrep](https://github.com/BurntSushi/ripgrep)** (`rg`) — required by `search_text`.
 - **[Universal Ctags](https://ctags.io)** — required by `find_symbol`. The BSD `ctags`
   shipped with macOS/Xcode does **not** work; it rejects the `--fields=+nK` flag metron
@@ -225,8 +228,9 @@ cp metron.example.json .metron.json
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `endpoint` | `http://localhost:11434/api/chat` | Ollama chat endpoint, path included |
+| `endpoint` | `http://localhost:11434/api/chat` | chat endpoint, full path included |
 | `model` | `qwen2.5-coder:32b` | model name to request |
+| `provider` | `ollama` | wire format: `ollama` or `openai` (see below) |
 | `timeout_seconds` | `180` | seconds of *silence* before a model call is abandoned |
 | `stream` | `true` | print the reply as it is generated |
 | `temperature` | `0.1` | sampling temperature |
@@ -254,6 +258,14 @@ validated (positive budgets, `top_p` in `(0, 1]`) before the agent starts.
 
 **The default model is probably not yours.** `qwen2.5-coder:32b` is a placeholder; set `model`
 to something you have actually pulled and that reports the `tools` capability.
+
+**Other local model servers.** Set `provider` to `openai` to talk to any server speaking the
+OpenAI-compatible chat completions format — llama.cpp's server, vLLM, LM Studio — instead of
+Ollama's native API. `endpoint` then points at that server's own path (typically ending in
+`/v1/chat/completions`), and `model` is whatever name the server expects. Both providers produce
+the same metron behaviour: same tools, same budgets, same streaming and token accounting. This
+stays local-only by design — metron has no cloud-provider support, only a second wire format for
+a second kind of local server.
 
 **`timeout_seconds` bounds silence, not total generation time.** It is an idle watchdog: it
 resets every time a chunk arrives, so a reply that takes ten minutes but keeps producing tokens
@@ -338,6 +350,7 @@ error, since that is an environment fault rather than a bad patch.
 main.go              REPL and commands. No conversation state lives here.
 internal/config      Settings: defaults, JSON file, environment, validation.
 internal/ollama      HTTP client for Ollama's /api/chat, plus the shared wire types.
+internal/openai      HTTP client for the OpenAI-compatible chat completions format.
 internal/agent       The agent loop, the system prompt, tool schemas, compaction.
 internal/tools       The five tools plus the startup dependency check.
 internal/session     Conversation persistence for --continue.

@@ -13,6 +13,11 @@ import (
 )
 
 type ToolCall struct {
+	// ID correlates a tool call to its result. Ollama's wire format doesn't
+	// use one -- results are matched by arrival order -- but OpenAI-style
+	// APIs require it on both the call and the tool_call_id of the message
+	// that answers it, so the field exists here for that provider to fill in.
+	ID       string `json:"id,omitempty"`
 	Function struct {
 		Name      string         `json:"name"`
 		Arguments map[string]any `json:"arguments"`
@@ -28,6 +33,9 @@ type Message struct {
 	// guessing the system prompt forbids.
 	ToolName  string     `json:"tool_name,omitempty"`
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+	// ToolCallID is set on a role:"tool" message to name the ToolCall.ID it
+	// answers, mirroring ToolName's job for providers that require it.
+	ToolCallID string `json:"tool_call_id,omitempty"`
 }
 
 type Tool struct {
