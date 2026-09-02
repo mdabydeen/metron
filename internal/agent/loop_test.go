@@ -746,3 +746,366 @@ func TestLastUsageResetsBetweenTurns(t *testing.T) {
 		t.Fatalf("LastUsage() = %+v, want only the most recent turn", usage)
 	}
 }
+
+func TestPlanModeRefusesApplyPatchUnconditionally(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	writeGitRepo(t)
+
+	approved := false
+	opts := DefaultOptions()
+	opts.PlanMode = true
+	opts.Approve = func(string) bool { approved = true; return true } // must never be consulted
+	a := New(&fakeChatter{}, opts)
+
+	diff := "--- a/target.txt\n+++ b/target.txt\n@@ -1 +1 @@\n-alpha\n+omega\n"
+	got := a.dispatch(toolCall("apply_patch", map[string]any{"diff": diff}).ToolCalls[0])
+
+	if approved {
+		t.Fatal("approver was consulted, want plan mode to short-circuit before it")
+	}
+	if !strings.Contains(got, "plan mode is active") {
+		t.Fatalf("dispatch() = %q, want the plan-mode refusal", got)
+	}
+	if !strings.Contains(got, "Do not retry") {
+		t.Fatalf("dispatch() = %q, want the model told not to retry", got)
+	}
+	body, err := os.ReadFile("target.txt")
+	if err != nil || string(body) != "alpha\n" {
+		t.Fatalf("target.txt = %q (err %v), want it untouched", body, err)
+	}
+}
+
+func TestSetPlanModeTogglesAtRuntime(t *testing.T) {
+	a := New(&fakeChatter{}, DefaultOptions())
+
+	if a.PlanMode() {
+		t.Fatal("PlanMode() = true initially, want false by default")
+	}
+
+	a.SetPlanMode(true)
+	if !a.PlanMode() {
+		t.Fatal("PlanMode() = false after SetPlanMode(true)")
+	}
+
+	a.SetPlanMode(false)
+	if a.PlanMode() {
+		t.Fatal("PlanMode() = true after SetPlanMode(false)")
+	}
+}
+
+func TestNewSeedsPlanModeFromOptions(t *testing.T) {
+	opts := DefaultOptions()
+	opts.PlanMode = true
+	a := New(&fakeChatter{}, opts)
+
+	if !a.PlanMode() {
+		t.Fatal("PlanMode() = false, want New to seed it from Options.PlanMode")
+	}
+}
+
+func TestNewInjectsInstructionsIntoTheSystemPrompt(t *testing.T) {
+	opts := DefaultOptions()
+	opts.Instructions = "Always answer in one sentence."
+	a := New(&fakeChatter{}, opts)
+
+	sys := a.messages[0]
+	if sys.Role != "system" {
+		t.Fatalf("messages[0].Role = %q, want system", sys.Role)
+	}
+	if !strings.Contains(sys.Content, "Always answer in one sentence.") {
+		t.Fatalf("system prompt = %q, want the instructions appended", sys.Content)
+	}
+	if !strings.Contains(sys.Content, systemPrompt) {
+		t.Fatal("system prompt lost the base instructions")
+	}
+}
+
+func TestNewLeavesTheSystemPromptAloneWhenInstructionsAreBlank(t *testing.T) {
+	a := New(&fakeChatter{}, DefaultOptions())
+
+	if a.messages[0].Content != systemPrompt {
+		t.Fatalf("system prompt = %q, want it unchanged with no instructions configured", a.messages[0].Content)
+	}
+}
+
+func TestResetKeepsInjectedInstructions(t *testing.T) {
+	opts := DefaultOptions()
+	opts.Instructions = "Project-specific rule."
+	a := New(&fakeChatter{}, opts)
+	a.messages = append(a.messages, ollama.Message{Role: "user", Content: "hi"})
+
+	a.Reset()
+
+	if len(a.messages) != 1 {
+		t.Fatalf("history = %d messages after Reset, want just the system prompt", len(a.messages))
+	}
+	if !strings.Contains(a.messages[0].Content, "Project-specific rule.") {
+		t.Fatal("Reset lost the injected instructions")
+	}
+}
+
+func TestDispatchConsultsThePreToolHookForEveryTool(t *testing.T) {
+	isolate(t)
+	var seenTool string
+	var seenArgs map[string]any
+	opts := DefaultOptions()
+	opts.PreToolHook = func(tool string, args map[string]any) (bool, string) {
+		seenTool, seenArgs = tool, args
+		return false, "policy says no"
+	}
+	a := New(&fakeChatter{}, opts)
+
+	got := a.dispatch(toolCall("find_symbol", map[string]any{"symbol": "Greet"}).ToolCalls[0])
+
+	if seenTool != "find_symbol" || seenArgs["symbol"] != "Greet" {
+		t.Fatalf("hook saw (%q, %v), want the tool name and args", seenTool, seenArgs)
+	}
+	if !strings.Contains(got, "policy says no") {
+		t.Fatalf("dispatch() = %q, want the hook's reason surfaced", got)
+	}
+	if !strings.Contains(got, "Do not retry") {
+		t.Fatalf("dispatch() = %q, want the model told not to retry", got)
+	}
+}
+
+func TestDispatchGivesADefaultReasonWhenTheHookDeniesSilently(t *testing.T) {
+	isolate(t)
+	opts := DefaultOptions()
+	opts.PreToolHook = func(string, map[string]any) (bool, string) { return false, "" }
+	a := New(&fakeChatter{}, opts)
+
+	got := a.dispatch(toolCall("list_files", nil).ToolCalls[0])
+
+	if !strings.Contains(got, "list_files") {
+		t.Fatalf("dispatch() = %q, want the tool named in the default reason", got)
+	}
+}
+
+func TestDispatchRunsTheToolWhenTheHookAllows(t *testing.T) {
+	dir := isolate(t)
+	if err := os.WriteFile(filepath.Join(dir, ".tags"), []byte(
+		"Alpha\tsample.go\t/^Alpha$/;\"\tkind:func\tline:1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	opts := DefaultOptions()
+	opts.PreToolHook = func(string, map[string]any) (bool, string) { return true, "" }
+	a := New(&fakeChatter{}, opts)
+
+	got := a.dispatch(toolCall("find_symbol", map[string]any{"symbol": "Alpha"}).ToolCalls[0])
+
+	if !strings.Contains(got, "sample.go:1") {
+		t.Fatalf("dispatch() = %q, want the tool to actually run", got)
+	}
+}
+
+func TestDispatchPlanModeCannotBeOverriddenByTheHook(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	writeGitRepo(t)
+
+	hookRan := false
+	opts := DefaultOptions()
+	opts.PlanMode = true
+	opts.PreToolHook = func(string, map[string]any) (bool, string) {
+		hookRan = true
+		return true, "" // even an allow must not matter
+	}
+	a := New(&fakeChatter{}, opts)
+
+	diff := "--- a/target.txt\n+++ b/target.txt\n@@ -1 +1 @@\n-alpha\n+omega\n"
+	got := a.dispatch(toolCall("apply_patch", map[string]any{"diff": diff}).ToolCalls[0])
+
+	if hookRan {
+		t.Fatal("PreToolHook was consulted, want plan mode to short-circuit before it")
+	}
+	if !strings.Contains(got, "plan mode is active") {
+		t.Fatalf("dispatch() = %q, want the plan-mode refusal", got)
+	}
+}
+
+func TestUndoRevertsTheMostRecentlyAppliedPatch(t *testing.T) {
+	t.Chdir(t.TempDir())
+	writeGitRepo(t)
+	a := New(&fakeChatter{}, DefaultOptions())
+
+	diff := "--- a/target.txt\n+++ b/target.txt\n@@ -1 +1 @@\n-alpha\n+omega\n"
+	if got := a.dispatch(toolCall("apply_patch", map[string]any{"diff": diff}).ToolCalls[0]); !strings.Contains(got, "successfully applied") {
+		t.Fatalf("setup dispatch() = %q, want the patch applied", got)
+	}
+
+	got, err := a.Undo()
+	if err != nil {
+		t.Fatalf("Undo() error = %v", err)
+	}
+	if !strings.Contains(got, "Reverted") {
+		t.Fatalf("Undo() = %q, want the revert reported", got)
+	}
+	b, rerr := os.ReadFile("target.txt")
+	if rerr != nil || string(b) != "alpha\n" {
+		t.Fatalf("target.txt = %q (err %v), want it reverted to the original", b, rerr)
+	}
+}
+
+func TestUndoReportsNothingToUndoOnAnEmptyStack(t *testing.T) {
+	a := New(&fakeChatter{}, DefaultOptions())
+
+	got, err := a.Undo()
+
+	if err != nil {
+		t.Fatalf("Undo() error = %v", err)
+	}
+	if got != "Nothing to undo." {
+		t.Fatalf("Undo() = %q, want the empty-stack message", got)
+	}
+}
+
+func TestUndoPopsOnlyOnASuccessfulRevert(t *testing.T) {
+	t.Chdir(t.TempDir())
+	writeGitRepo(t)
+	a := New(&fakeChatter{}, DefaultOptions())
+
+	diff := "--- a/target.txt\n+++ b/target.txt\n@@ -1 +1 @@\n-alpha\n+omega\n"
+	a.dispatch(toolCall("apply_patch", map[string]any{"diff": diff}).ToolCalls[0])
+	// Change the file out from under the recorded diff so the revert dry-run fails.
+	if err := os.WriteFile("target.txt", []byte("something else\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := a.Undo()
+	if err != nil {
+		t.Fatalf("Undo() error = %v", err)
+	}
+	if !strings.Contains(got, "dry-run failed") {
+		t.Fatalf("Undo() = %q, want the failed dry-run reported", got)
+	}
+
+	// The stack must still hold the diff since the revert never happened.
+	got2, err2 := a.Undo()
+	if err2 != nil {
+		t.Fatalf("second Undo() error = %v", err2)
+	}
+	if got2 == "Nothing to undo." {
+		t.Fatal("second Undo() reports empty stack, want the failed revert to have stayed on it")
+	}
+}
+
+func TestUndoOnlyTracksSuccessfullyAppliedPatches(t *testing.T) {
+	t.Chdir(t.TempDir())
+	writeGitRepo(t)
+	a := New(&fakeChatter{}, DefaultOptions())
+
+	a.dispatch(toolCall("apply_patch", map[string]any{"diff": "not a diff"}).ToolCalls[0])
+
+	if got, err := a.Undo(); err != nil || got != "Nothing to undo." {
+		t.Fatalf("Undo() = (%q, %v), want a rejected patch to never reach the undo stack", got, err)
+	}
+}
+
+func TestPushUndoTrimsToMaxUndoStack(t *testing.T) {
+	opts := DefaultOptions()
+	opts.MaxUndoStack = 2
+	a := New(&fakeChatter{}, opts)
+
+	a.pushUndo("one")
+	a.pushUndo("two")
+	a.pushUndo("three")
+
+	if len(a.undoStack) != 2 {
+		t.Fatalf("undoStack = %v, want it trimmed to 2 entries", a.undoStack)
+	}
+	if a.undoStack[0] != "two" || a.undoStack[1] != "three" {
+		t.Fatalf("undoStack = %v, want the oldest entry dropped", a.undoStack)
+	}
+}
+
+func TestPushUndoTreatsANonPositiveMaxAsUnlimited(t *testing.T) {
+	opts := DefaultOptions()
+	opts.MaxUndoStack = 0
+	a := New(&fakeChatter{}, opts)
+
+	for i := 0; i < 50; i++ {
+		a.pushUndo("x")
+	}
+
+	if len(a.undoStack) != 50 {
+		t.Fatalf("undoStack has %d entries, want an unlimited budget to keep them all", len(a.undoStack))
+	}
+}
+
+func TestUndoReportsAnEnvironmentFailure(t *testing.T) {
+	t.Chdir(t.TempDir())
+	writeGitRepo(t)
+	a := New(&fakeChatter{}, DefaultOptions())
+	diff := "--- a/target.txt\n+++ b/target.txt\n@@ -1 +1 @@\n-alpha\n+omega\n"
+	a.dispatch(toolCall("apply_patch", map[string]any{"diff": diff}).ToolCalls[0])
+
+	// Remove git from PATH so RevertPatch hits its environment-fault branch.
+	t.Setenv("PATH", t.TempDir())
+
+	_, err := a.Undo()
+
+	if err == nil {
+		t.Fatal("Undo() error = nil, want the missing-git failure surfaced")
+	}
+}
+
+func TestMessagesReturnsACopy(t *testing.T) {
+	a := New(&fakeChatter{}, DefaultOptions())
+	a.messages = append(a.messages, ollama.Message{Role: "user", Content: "hi"})
+
+	got := a.Messages()
+	got[0].Content = "corrupted"
+
+	if a.messages[0].Content == "corrupted" {
+		t.Fatal("Messages() returned the live slice, want an independent copy")
+	}
+	if len(got) != len(a.messages) {
+		t.Fatalf("Messages() = %d entries, want %d", len(got), len(a.messages))
+	}
+}
+
+func TestLoadMessagesReplacesHistory(t *testing.T) {
+	a := New(&fakeChatter{}, DefaultOptions())
+	saved := []ollama.Message{
+		{Role: "system", Content: "sys"},
+		{Role: "user", Content: "earlier question"},
+		{Role: "assistant", Content: "earlier answer"},
+	}
+
+	a.LoadMessages(saved)
+
+	if len(a.messages) != 3 {
+		t.Fatalf("history = %d messages, want the loaded 3", len(a.messages))
+	}
+	if a.messages[1].Content != "earlier question" {
+		t.Fatalf("history[1] = %+v, want the loaded user message", a.messages[1])
+	}
+}
+
+func TestLoadMessagesPrependsTheSystemPromptWhenMissing(t *testing.T) {
+	a := New(&fakeChatter{}, DefaultOptions())
+	saved := []ollama.Message{{Role: "user", Content: "no system message"}}
+
+	a.LoadMessages(saved)
+
+	if a.messages[0].Role != "system" {
+		t.Fatalf("history[0].Role = %q, want the current system prompt prepended", a.messages[0].Role)
+	}
+	if a.messages[0].Content != systemPrompt {
+		t.Fatal("history[0] does not match the agent's own system prompt")
+	}
+	if len(a.messages) != 2 {
+		t.Fatalf("history = %d messages, want the system prompt plus the loaded one", len(a.messages))
+	}
+}
+
+func TestLoadMessagesPrependsOnEmptyInput(t *testing.T) {
+	a := New(&fakeChatter{}, DefaultOptions())
+
+	a.LoadMessages(nil)
+
+	if len(a.messages) != 1 || a.messages[0].Role != "system" {
+		t.Fatalf("history = %+v, want just the system prompt for empty input", a.messages)
+	}
+}

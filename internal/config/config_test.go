@@ -271,3 +271,86 @@ func TestSearchOrder(t *testing.T) {
 		}
 	})
 }
+
+func TestLoadInstructionsMissingFileIsNotAnError(t *testing.T) {
+	dir := t.TempDir()
+
+	got, err := LoadInstructions(filepath.Join(dir, "AGENTS.md"), 4096)
+
+	if err != nil {
+		t.Fatalf("LoadInstructions() error = %v, want a missing file treated as optional", err)
+	}
+	if got != "" {
+		t.Fatalf("LoadInstructions() = %q, want empty for a missing file", got)
+	}
+}
+
+func TestLoadInstructionsReadsThePresentFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "AGENTS.md")
+	if err := os.WriteFile(path, []byte("Always answer in one sentence.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := LoadInstructions(path, 4096)
+
+	if err != nil {
+		t.Fatalf("LoadInstructions() error = %v", err)
+	}
+	if got != "Always answer in one sentence." {
+		t.Fatalf("LoadInstructions() = %q, want the trailing newline trimmed", got)
+	}
+}
+
+func TestLoadInstructionsTruncatesAtTheByteBudget(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "AGENTS.md")
+	if err := os.WriteFile(path, []byte(strings.Repeat("x", 100)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := LoadInstructions(path, 10)
+
+	if err != nil {
+		t.Fatalf("LoadInstructions() error = %v", err)
+	}
+	if !strings.HasPrefix(got, strings.Repeat("x", 10)) || !strings.Contains(got, "truncated") {
+		t.Fatalf("LoadInstructions() = %q, want it clipped at 10 bytes and marked", got)
+	}
+}
+
+func TestLoadInstructionsUnlimitedWhenBudgetIsNonPositive(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "AGENTS.md")
+	content := strings.Repeat("y", 5000)
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := LoadInstructions(path, 0)
+
+	if err != nil {
+		t.Fatalf("LoadInstructions() error = %v", err)
+	}
+	if got != content {
+		t.Fatalf("LoadInstructions() truncated with a non-positive budget, want it passed through")
+	}
+}
+
+func TestLoadInstructionsReportsUnreadableFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "AGENTS.md")
+	if err := os.WriteFile(path, []byte("x"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(path, 0o644) })
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores file permissions")
+	}
+
+	_, err := LoadInstructions(path, 4096)
+
+	if err == nil {
+		t.Fatal("LoadInstructions() = nil error, want the permission failure reported")
+	}
+}

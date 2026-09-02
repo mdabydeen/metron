@@ -132,6 +132,7 @@ func liveSetup(t *testing.T) (*countingChatter, *agent.Agent, config.Config) {
 		SearchMaxMatches:   cfg.SearchMaxMatches,
 		SearchMaxPerFile:   cfg.SearchMaxPerFile,
 		ListMaxEntries:     cfg.ListMaxEntries,
+		MaxUndoStack:       cfg.MaxUndoStack,
 	}), cfg
 }
 

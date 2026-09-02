@@ -10,12 +10,14 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"metron/internal/agent"
 	"metron/internal/config"
 	"metron/internal/ollama"
+	"metron/internal/session"
 	"metron/internal/tools"
 )
 
@@ -24,6 +26,8 @@ const helpText = `Commands:
   /config  show the active settings and where they came from
   /reset   clear the conversation history (keeps the system prompt)
   /history show how much conversation is being carried
+  /plan    toggle read-only mode (apply_patch is refused while active)
+  /undo    revert the most recently applied patch
   /tags    rebuild the ctags symbol index for the current directory
   /exit    quit (also: exit, quit, Ctrl-D)
 
@@ -39,6 +43,11 @@ type stepper interface {
 	Reset()
 	HistorySize() (messages, bytes int)
 	LastUsage() (ollama.Usage, int)
+	SetPlanMode(enabled bool)
+	PlanMode() bool
+	Undo() (string, error)
+	Messages() []ollama.Message
+	LoadMessages(msgs []ollama.Message)
 }
 
 // exit is indirected so tests can exercise main without killing the process.
@@ -57,6 +66,8 @@ type flags struct {
 	prompt      string
 	yes         bool
 	showVersion bool
+	plan        bool
+	cont        bool
 }
 
 // parseFlags reads the command line. It reports ok=false when the process
@@ -68,6 +79,8 @@ func parseFlags(args []string, errOut io.Writer) (f flags, code int, ok bool) {
 	fs.StringVar(&f.prompt, "prompt", "", "run one request non-interactively and exit")
 	fs.BoolVar(&f.yes, "yes", false, "apply patches without asking (required by -p to edit files)")
 	fs.BoolVar(&f.showVersion, "version", false, "print the version and exit")
+	fs.BoolVar(&f.plan, "plan", false, "start in read-only mode: apply_patch is refused")
+	fs.BoolVar(&f.cont, "continue", false, "resume the last saved session ("+session.Path+")")
 	fs.Usage = func() {
 		fmt.Fprintf(errOut, "usage: metron [flags]\n\nRun from the root of the repository you want to work on.\n\n")
 		fs.PrintDefaults()
@@ -99,6 +112,18 @@ func runMain(args []string, in io.Reader, out, errOut io.Writer) int {
 		return 1
 	}
 
+	instructions, err := config.LoadInstructions(cfg.InstructionsFile, cfg.MaxInstructionsBytes)
+	if err != nil {
+		fmt.Fprintf(errOut, "\033[31minstructions error: %v\033[0m\n", err)
+		return 1
+	}
+
+	commands, err := loadCommands(commandsDir, cfg.MaxCommandBytes)
+	if err != nil {
+		fmt.Fprintf(errOut, "\033[31mcommands error: %v\033[0m\n", err)
+		return 1
+	}
+
 	clientOpts := ollama.Options{
 		Temperature: cfg.Temperature,
 		TopP:        cfg.TopP,
@@ -123,6 +148,7 @@ func runMain(args []string, in io.Reader, out, errOut io.Writer) int {
 
 	opts := agent.Options{
 		MaxTurns:           cfg.MaxTurns,
+		PlanMode:           cfg.PlanModeDefault || f.plan,
 		CompactThreshold:   cfg.CompactThreshold,
 		MaxHistoryMessages: cfg.MaxHistoryMessages,
 		MaxSliceLines:      cfg.MaxSliceLines,
@@ -130,7 +156,10 @@ func runMain(args []string, in io.Reader, out, errOut io.Writer) int {
 		SearchMaxMatches:   cfg.SearchMaxMatches,
 		SearchMaxPerFile:   cfg.SearchMaxPerFile,
 		ListMaxEntries:     cfg.ListMaxEntries,
+		MaxUndoStack:       cfg.MaxUndoStack,
+		Instructions:       instructions,
 		Progress:           out,
+		PreToolHook:        preToolHook(cfg.PreToolHook),
 	}
 	autoApprove := cfg.AutoApprovePatches || f.yes
 	switch {
@@ -146,12 +175,37 @@ func runMain(args []string, in io.Reader, out, errOut io.Writer) int {
 	}
 	bot := agent.New(client, opts)
 
+	if f.cont {
+		saved, err := session.Load(session.Path)
+		if err != nil {
+			fmt.Fprintf(errOut, "\033[31mcontinue error: %v\033[0m\n", err)
+			return 1
+		}
+		bot.LoadMessages(saved)
+	}
+
 	if f.prompt != "" {
 		return oneShot(context.Background(), out, errOut, bot, f.prompt)
 	}
 
-	run(context.Background(), scanner, out, cfg, path, bot, streamed)
+	run(context.Background(), scanner, out, cfg, path, bot, streamed, instructions, commands)
 	return 0
+}
+
+// preToolHook wraps the configured shell command as an agent.Options
+// PreToolHook, or returns nil when none is configured -- a nil hook allows
+// everything, so an unconfigured hook has no effect.
+func preToolHook(cmdline string) func(string, map[string]any) (bool, string) {
+	if cmdline == "" {
+		return nil
+	}
+	return func(tool string, args map[string]any) (bool, string) {
+		allowed, reason, err := tools.RunPreToolHook(cmdline, tool, args)
+		if err != nil {
+			return false, fmt.Sprintf("pre_tool_hook failed to run: %v", err)
+		}
+		return allowed, reason
+	}
 }
 
 // oneShot runs a single request and prints only the answer on stdout, so
@@ -172,6 +226,69 @@ func oneShot(ctx context.Context, out, errOut io.Writer, bot stepper, prompt str
 // maxInputLine lets a pasted diff or a long request through; the scanner
 // default of 64KB silently ends the session on anything larger.
 const maxInputLine = 1 << 20
+
+// commandsDir is where project-level custom slash commands live, alongside
+// the session file and gitignored the same way.
+const commandsDir = ".metron/commands"
+
+// commandTruncatedMarker mirrors config's instructionsTruncatedMarker for the
+// same reason: say plainly when a template was cut off rather than silently
+// truncating it.
+const commandTruncatedMarker = "\n[command truncated]"
+
+// builtinCommands names every command handled by command() itself, so a
+// custom command can never shadow one -- an operator typing /reset should
+// always get the real /reset.
+var builtinCommands = map[string]bool{
+	"/help": true, "/config": true, "/reset": true, "/history": true,
+	"/plan": true, "/undo": true, "/tags": true, "/exit": true, "/quit": true,
+}
+
+// loadCommands reads .metron/commands/*.md as name -> prompt-template pairs,
+// keyed without the leading slash or the .md extension. A missing directory
+// is not an error -- the feature is optional, same as AGENTS.md.
+func loadCommands(dir string, maxBytes int) (map[string]string, error) {
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read commands directory %s: %w", dir, err)
+	}
+	commands := make(map[string]string)
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".md" {
+			continue
+		}
+		path := filepath.Join(dir, e.Name())
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("read command %s: %w", path, err)
+		}
+		text := strings.TrimSpace(string(data))
+		if maxBytes > 0 && len(text) > maxBytes {
+			text = text[:maxBytes] + commandTruncatedMarker
+		}
+		commands[strings.TrimSuffix(e.Name(), ".md")] = text
+	}
+	return commands, nil
+}
+
+// expandCommand substitutes $ARGUMENTS in a command template with whatever
+// followed the command name, so a template like "Review $ARGUMENTS for bugs."
+// invoked as "/review internal/tools/slice.go" becomes a real, usable prompt.
+func expandCommand(template, args string) string {
+	return strings.ReplaceAll(template, "$ARGUMENTS", args)
+}
+
+// saveSession persists the conversation so --continue can resume it. A
+// failure is reported but never fatal -- losing the save is not worth losing
+// the session the operator was just in.
+func saveSession(out io.Writer, bot stepper) {
+	if err := session.Save(session.Path, bot.Messages()); err != nil {
+		fmt.Fprintf(out, "\033[33mwarning: could not save session: %v\033[0m\n", err)
+	}
+}
 
 // approve shows the model's diff and waits for a yes. It reads from the REPL's
 // own scanner, so a queued line is consumed here rather than being mistaken for
@@ -196,11 +313,14 @@ func approve(out io.Writer, scanner *bufio.Scanner, diff string) bool {
 // streamed tells run that replies already reached out as they arrived, so it
 // must not print them a second time. It is a parameter rather than a read of
 // cfg.Stream because the caller is what actually wires the client's sink.
-func run(ctx context.Context, scanner *bufio.Scanner, out io.Writer, cfg config.Config, cfgPath string, bot stepper, streamed bool) {
+func run(ctx context.Context, scanner *bufio.Scanner, out io.Writer, cfg config.Config, cfgPath string, bot stepper, streamed bool, instructions string, commands map[string]string) {
 	fmt.Fprintf(out, "\033[1;36m=== metron (model: %s) ===\033[0m\n", cfg.Model)
 	fmt.Fprintln(out, "Context-disciplined terminal coder. /help for commands, /exit to quit.")
 	if cfgPath != "" {
 		fmt.Fprintf(out, "config: %s\n", cfgPath)
+	}
+	if instructions != "" {
+		fmt.Fprintf(out, "project instructions: %s (%d bytes)\n", cfg.InstructionsFile, len(instructions))
 	}
 	for _, w := range tools.Preflight() {
 		fmt.Fprintf(out, "\033[33mwarning: %s\033[0m\n", w)
@@ -209,17 +329,34 @@ func run(ctx context.Context, scanner *bufio.Scanner, out io.Writer, cfg config.
 	for {
 		fmt.Fprint(out, "\n\033[1;32mmetron > \033[0m")
 		if !scanner.Scan() {
+			saveSession(out, bot)
 			return
 		}
 		input := strings.TrimSpace(scanner.Text())
 		if input == "" {
 			continue
 		}
-		if done := command(out, input, cfg, cfgPath, bot); done {
-			return
-		}
+		// A custom command (from .metron/commands/) is expanded and falls
+		// through to be sent to the model below, exactly as if the operator
+		// had typed the expansion. Anything else -- including bare "exit"/
+		// "quit" and unknown "/foo" -- goes through the built-in dispatch,
+		// unconditionally, matching pre-custom-command behaviour.
+		expandedFromCommand := false
 		if strings.HasPrefix(input, "/") {
-			continue
+			name, rest, _ := strings.Cut(input, " ")
+			if template, ok := commands[strings.TrimPrefix(name, "/")]; ok && !builtinCommands[name] {
+				input = expandCommand(template, rest)
+				expandedFromCommand = true
+			}
+		}
+		if !expandedFromCommand {
+			if done := command(out, input, cfg, cfgPath, bot); done {
+				saveSession(out, bot)
+				return
+			}
+			if strings.HasPrefix(input, "/") {
+				continue
+			}
 		}
 
 		if streamed {
@@ -313,6 +450,20 @@ func command(out io.Writer, input string, cfg config.Config, cfgPath string, bot
 		msgs, bytes := bot.HistorySize()
 		fmt.Fprintf(out, "history: %d messages, ~%d bytes (budget: %d messages; /reset clears it)\n",
 			msgs, bytes, cfg.MaxHistoryMessages)
+	case "/plan":
+		bot.SetPlanMode(!bot.PlanMode())
+		if bot.PlanMode() {
+			fmt.Fprintln(out, "plan mode: on (apply_patch is refused until toggled off)")
+		} else {
+			fmt.Fprintln(out, "plan mode: off (apply_patch behaves normally)")
+		}
+	case "/undo":
+		msg, err := bot.Undo()
+		if err != nil {
+			fmt.Fprintf(out, "\033[31mError: %v\033[0m\n", err)
+			break
+		}
+		fmt.Fprintln(out, msg)
 	case "/tags":
 		if err := tools.RebuildTags(); err != nil {
 			fmt.Fprintf(out, "\033[31mError: %v\033[0m\n", err)
