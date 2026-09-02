@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,17 +18,23 @@ import (
 
 	"metron/internal/config"
 	"metron/internal/ollama"
+	"metron/internal/openai"
 )
 
 type fakeStepper struct {
-	prompts []string
-	reply   string
-	err     error
-	resets  int
-	msgs    int
-	bytes   int
-	usage   ollama.Usage
-	calls   int
+	prompts   []string
+	reply     string
+	err       error
+	resets    int
+	msgs      int
+	bytes     int
+	usage     ollama.Usage
+	calls     int
+	planMode  bool
+	undoMsg   string
+	undoErr   error
+	undoCalls int
+	loaded    []ollama.Message
 }
 
 func (f *fakeStepper) Step(ctx context.Context, userPrompt string) (string, error) {
@@ -42,6 +50,19 @@ func (f *fakeStepper) Reset() { f.resets++ }
 func (f *fakeStepper) HistorySize() (int, int) { return f.msgs, f.bytes }
 
 func (f *fakeStepper) LastUsage() (ollama.Usage, int) { return f.usage, f.calls }
+
+func (f *fakeStepper) SetPlanMode(enabled bool) { f.planMode = enabled }
+
+func (f *fakeStepper) PlanMode() bool { return f.planMode }
+
+func (f *fakeStepper) Undo() (string, error) {
+	f.undoCalls++
+	return f.undoMsg, f.undoErr
+}
+
+func (f *fakeStepper) Messages() []ollama.Message { return []ollama.Message{{Role: "system"}} }
+
+func (f *fakeStepper) LoadMessages(msgs []ollama.Message) { f.loaded = msgs }
 
 // replFor wraps REPL input the way runMain does, since run reads from a shared
 // scanner rather than an io.Reader of its own.
@@ -60,7 +81,7 @@ func TestRunSendsEachLineToTheAgent(t *testing.T) {
 	bot := &fakeStepper{reply: "an answer"}
 	var out bytes.Buffer
 
-	run(context.Background(), replFor("first\n  second  \n"), &out, cfgFor("test-model"), "", bot, false)
+	run(context.Background(), replFor("first\n  second  \n"), &out, cfgFor("test-model"), "", bot, false, "", nil)
 
 	if len(bot.prompts) != 2 || bot.prompts[0] != "first" || bot.prompts[1] != "second" {
 		t.Fatalf("prompts = %q, want the trimmed input lines", bot.prompts)
@@ -77,7 +98,7 @@ func TestRunSkipsBlankLines(t *testing.T) {
 	bot := &fakeStepper{reply: "ok"}
 	var out bytes.Buffer
 
-	run(context.Background(), replFor("\n   \n\nreal\n"), &out, cfgFor("m"), "", bot, false)
+	run(context.Background(), replFor("\n   \n\nreal\n"), &out, cfgFor("m"), "", bot, false, "", nil)
 
 	if len(bot.prompts) != 1 || bot.prompts[0] != "real" {
 		t.Fatalf("prompts = %q, want blank lines ignored", bot.prompts)
@@ -90,7 +111,7 @@ func TestRunStopsOnExitCommands(t *testing.T) {
 			bot := &fakeStepper{reply: "ok"}
 			var out bytes.Buffer
 
-			run(context.Background(), replFor(cmd+"\nafter\n"), &out, cfgFor("m"), "", bot, false)
+			run(context.Background(), replFor(cmd+"\nafter\n"), &out, cfgFor("m"), "", bot, false, "", nil)
 
 			if len(bot.prompts) != 0 {
 				t.Fatalf("prompts = %q, want the loop to stop at %q", bot.prompts, cmd)
@@ -103,7 +124,7 @@ func TestRunStopsAtEOF(t *testing.T) {
 	bot := &fakeStepper{reply: "ok"}
 	var out bytes.Buffer
 
-	run(context.Background(), replFor("only\n"), &out, cfgFor("m"), "", bot, false)
+	run(context.Background(), replFor("only\n"), &out, cfgFor("m"), "", bot, false, "", nil)
 
 	if len(bot.prompts) != 1 {
 		t.Fatalf("prompts = %q, want a clean stop at EOF", bot.prompts)
@@ -114,7 +135,7 @@ func TestRunKeepsGoingAfterAnAgentError(t *testing.T) {
 	bot := &fakeStepper{err: errors.New("ollama unreachable")}
 	var out bytes.Buffer
 
-	run(context.Background(), replFor("one\ntwo\n"), &out, cfgFor("m"), "", bot, false)
+	run(context.Background(), replFor("one\ntwo\n"), &out, cfgFor("m"), "", bot, false, "", nil)
 
 	if len(bot.prompts) != 2 {
 		t.Fatalf("prompts = %q, want the REPL to survive the error", bot.prompts)
@@ -126,7 +147,7 @@ func TestRunKeepsGoingAfterAnAgentError(t *testing.T) {
 
 func TestRunShowsConfigPathWhenOneIsUsed(t *testing.T) {
 	var out bytes.Buffer
-	run(context.Background(), replFor("exit\n"), &out, cfgFor("m"), "/etc/metron.json", &fakeStepper{}, false)
+	run(context.Background(), replFor("exit\n"), &out, cfgFor("m"), "/etc/metron.json", &fakeStepper{}, false, "", nil)
 
 	if !strings.Contains(out.String(), "config: /etc/metron.json") {
 		t.Fatalf("output = %q, want the config path in the banner", out.String())
@@ -137,7 +158,7 @@ func TestRunWarnsAboutMissingDependencies(t *testing.T) {
 	t.Setenv("PATH", filepath.Join(t.TempDir(), "empty"))
 	var out bytes.Buffer
 
-	run(context.Background(), replFor("exit\n"), &out, cfgFor("m"), "", &fakeStepper{}, false)
+	run(context.Background(), replFor("exit\n"), &out, cfgFor("m"), "", &fakeStepper{}, false, "", nil)
 
 	for _, want := range []string{"rg not found", "ctags not found", "git not found"} {
 		if !strings.Contains(out.String(), want) {
@@ -150,7 +171,7 @@ func TestRunDoesNotSendCommandsToTheModel(t *testing.T) {
 	bot := &fakeStepper{reply: "ok"}
 	var out bytes.Buffer
 
-	run(context.Background(), replFor("/help\n/reset\n/nope\nreal question\n"), &out, cfgFor("m"), "", bot, false)
+	run(context.Background(), replFor("/help\n/reset\n/nope\nreal question\n"), &out, cfgFor("m"), "", bot, false, "", nil)
 
 	if len(bot.prompts) != 1 || bot.prompts[0] != "real question" {
 		t.Fatalf("prompts = %q, want only the non-command line forwarded", bot.prompts)
@@ -166,7 +187,7 @@ func TestCommandHelp(t *testing.T) {
 	if quit := command(&out, "/help", config.Defaults(), "", &fakeStepper{}); quit {
 		t.Fatal("/help asked the REPL to quit")
 	}
-	for _, want := range []string{"/help", "/config", "/reset", "/tags", "/exit"} {
+	for _, want := range []string{"/help", "/config", "/reset", "/history", "/plan", "/undo", "/tags", "/exit"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("help text %q missing %q", out.String(), want)
 		}
@@ -461,7 +482,7 @@ func TestRunReportsACancelledTurnAndKeepsGoing(t *testing.T) {
 	var out bytes.Buffer
 	bot := &fakeStepper{err: context.Canceled}
 
-	run(context.Background(), replFor("first\nsecond\n"), &out, cfgFor("m"), "", bot, false)
+	run(context.Background(), replFor("first\nsecond\n"), &out, cfgFor("m"), "", bot, false, "", nil)
 
 	if !strings.Contains(out.String(), "cancelled") {
 		t.Fatalf("output = %q, want the cancellation reported", out.String())
@@ -479,6 +500,11 @@ func (contextStepper) Step(ctx context.Context, _ string) (string, error) { retu
 func (contextStepper) Reset()                                             {}
 func (contextStepper) HistorySize() (int, int)                            { return 0, 0 }
 func (contextStepper) LastUsage() (ollama.Usage, int)                     { return ollama.Usage{}, 0 }
+func (contextStepper) SetPlanMode(bool)                                   {}
+func (contextStepper) PlanMode() bool                                     { return false }
+func (contextStepper) Undo() (string, error)                              { return "", nil }
+func (contextStepper) Messages() []ollama.Message                         { return nil }
+func (contextStepper) LoadMessages([]ollama.Message)                      {}
 
 // signallingStepper raises a real SIGINT from inside the turn, which the
 // handler step installs is expected to intercept and turn into a cancellation
@@ -499,6 +525,11 @@ func (signallingStepper) Step(ctx context.Context, _ string) (string, error) {
 func (signallingStepper) Reset()                         {}
 func (signallingStepper) HistorySize() (int, int)        { return 0, 0 }
 func (signallingStepper) LastUsage() (ollama.Usage, int) { return ollama.Usage{}, 0 }
+func (signallingStepper) SetPlanMode(bool)               {}
+func (signallingStepper) PlanMode() bool                 { return false }
+func (signallingStepper) Undo() (string, error)          { return "", nil }
+func (signallingStepper) Messages() []ollama.Message     { return nil }
+func (signallingStepper) LoadMessages([]ollama.Message)  {}
 
 func TestStepCancelsTheTurnOnInterrupt(t *testing.T) {
 	_, err := step(context.Background(), signallingStepper{}, "slow request")
@@ -548,6 +579,93 @@ func TestRunMainWiresThePatchApprovalPrompt(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "x.txt")); !os.IsNotExist(err) {
 		t.Fatal("x.txt exists, want a refused patch to leave the tree untouched")
+	}
+}
+
+func TestTrustedPreToolHookRefusesAnUntrustedProjectFile(t *testing.T) {
+	var errOut bytes.Buffer
+
+	got := trustedPreToolHook("echo hi", config.ProjectFile, &errOut)
+
+	if got != "" {
+		t.Fatalf("cmdline = %q, want the project-sourced hook refused", got)
+	}
+	if !strings.Contains(errOut.String(), "ignoring pre_tool_hook") {
+		t.Fatalf("stderr = %q, want a warning explaining the refusal", errOut.String())
+	}
+}
+
+func TestTrustedPreToolHookAllowsAnOptedInProjectFile(t *testing.T) {
+	t.Setenv(trustProjectHookEnv, "1")
+	var errOut bytes.Buffer
+
+	got := trustedPreToolHook("echo hi", config.ProjectFile, &errOut)
+
+	if got != "echo hi" {
+		t.Fatalf("cmdline = %q, want the hook honored once trusted", got)
+	}
+	if errOut.String() != "" {
+		t.Fatalf("stderr = %q, want no warning once opted in", errOut.String())
+	}
+}
+
+func TestTrustedPreToolHookAllowsTheUserLevelConfig(t *testing.T) {
+	var errOut bytes.Buffer
+
+	got := trustedPreToolHook("echo hi", "/home/me/.config/metron/config.json", &errOut)
+
+	if got != "echo hi" {
+		t.Fatalf("cmdline = %q, want a user-config hook honored without opt-in", got)
+	}
+	if errOut.String() != "" {
+		t.Fatalf("stderr = %q, want no warning for a trusted source", errOut.String())
+	}
+}
+
+func TestTrustedPreToolHookIgnoresEmptyConfiguration(t *testing.T) {
+	var errOut bytes.Buffer
+
+	got := trustedPreToolHook("", config.ProjectFile, &errOut)
+
+	if got != "" || errOut.String() != "" {
+		t.Fatalf("got %q, %q, want no-op when no hook is configured", got, errOut.String())
+	}
+}
+
+// TestRunMainRefusesAProjectHookWithoutOptIn is the end-to-end check: a
+// pre_tool_hook shipped in ./.metron.json must not run just because a repo
+// was cloned and metron started in it.
+func TestRunMainRefusesAProjectHookWithoutOptIn(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	t.Setenv("METRON_CONFIG", "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv(trustProjectHookEnv, "")
+
+	marker := filepath.Join(dir, "hook-ran")
+	hookCfg := fmt.Sprintf(`{"pre_tool_hook":"touch %s"}`, marker)
+	if err := os.WriteFile(filepath.Join(dir, config.ProjectFile), []byte(hookCfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"message":{"role":"assistant","content":"listing"},"done":true}`))
+	}))
+	defer srv.Close()
+	t.Setenv("OLLAMA_HOST", srv.URL+"/api/chat")
+	t.Setenv("OLLAMA_MODEL", "hook-model")
+
+	var out, errOut bytes.Buffer
+	code := runMain(nil, strings.NewReader("exit\n"), &out, &errOut)
+
+	if code != 0 {
+		t.Fatalf("runMain() = %d, want 0", code)
+	}
+	if !strings.Contains(errOut.String(), "ignoring pre_tool_hook") {
+		t.Fatalf("stderr = %q, want the refusal warning", errOut.String())
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatal("hook marker file exists, want the untrusted project hook never to have run")
 	}
 }
 
@@ -612,7 +730,7 @@ func TestRunReportsTokenUsage(t *testing.T) {
 	var out bytes.Buffer
 	bot := &fakeStepper{reply: "ok", usage: ollama.Usage{PromptTokens: 1240, GenTokens: 89}, calls: 3}
 
-	run(context.Background(), replFor("hi\n"), &out, cfgFor("m"), "", bot, false)
+	run(context.Background(), replFor("hi\n"), &out, cfgFor("m"), "", bot, false, "", nil)
 
 	for _, want := range []string{"1240 prompt", "89 generated", "3 tool calls"} {
 		if !strings.Contains(out.String(), want) {
@@ -625,7 +743,7 @@ func TestRunStaysQuietWhenTheServerReportsNoCounts(t *testing.T) {
 	var out bytes.Buffer
 	bot := &fakeStepper{reply: "ok"}
 
-	run(context.Background(), replFor("hi\n"), &out, cfgFor("m"), "", bot, false)
+	run(context.Background(), replFor("hi\n"), &out, cfgFor("m"), "", bot, false, "", nil)
 
 	if strings.Contains(out.String(), "tool calls") {
 		t.Fatalf("output = %q, want no usage line when there is nothing to report", out.String())
@@ -638,7 +756,7 @@ func TestRunWarnsWhenThePromptCrowdsTheContextWindow(t *testing.T) {
 	cfg.NumCtx = 1000
 	bot := &fakeStepper{reply: "ok", usage: ollama.Usage{PromptTokens: 900, GenTokens: 10}}
 
-	run(context.Background(), replFor("hi\n"), &out, cfg, "", bot, false)
+	run(context.Background(), replFor("hi\n"), &out, cfg, "", bot, false, "", nil)
 
 	if !strings.Contains(out.String(), "900 of 1000 context tokens") {
 		t.Fatalf("output = %q, want the context-pressure warning", out.String())
@@ -651,7 +769,7 @@ func TestRunDoesNotWarnBelowTheContextThreshold(t *testing.T) {
 	cfg.NumCtx = 1000
 	bot := &fakeStepper{reply: "ok", usage: ollama.Usage{PromptTokens: 100, GenTokens: 10}}
 
-	run(context.Background(), replFor("hi\n"), &out, cfg, "", bot, false)
+	run(context.Background(), replFor("hi\n"), &out, cfg, "", bot, false, "", nil)
 
 	// Startup dependency warnings are unrelated; only the context one matters.
 	if strings.Contains(out.String(), "context tokens") {
@@ -671,6 +789,8 @@ func TestParseFlags(t *testing.T) {
 		{"short prompt", []string{"-p", "fix it"}, flags{prompt: "fix it"}, true, 0},
 		{"long prompt", []string{"--prompt", "fix it"}, flags{prompt: "fix it"}, true, 0},
 		{"yes", []string{"--yes"}, flags{yes: true}, true, 0},
+		{"plan", []string{"--plan"}, flags{plan: true}, true, 0},
+		{"continue", []string{"--continue"}, flags{cont: true}, true, 0},
 		{"version", []string{"--version"}, flags{showVersion: true}, true, 0},
 		{"help stops without an error", []string{"-h"}, flags{}, false, 0},
 		{"unknown flag is an error", []string{"--nope"}, flags{}, false, 2},
@@ -693,7 +813,7 @@ func TestParseFlagsUsageNamesTheFlags(t *testing.T) {
 	var errOut bytes.Buffer
 	parseFlags([]string{"-h"}, &errOut)
 
-	for _, want := range []string{"usage: metron", "-p", "-yes", "-version"} {
+	for _, want := range []string{"usage: metron", "-p", "-yes", "-version", "-plan", "-continue"} {
 		if !strings.Contains(errOut.String(), want) {
 			t.Errorf("usage = %q, missing %q", errOut.String(), want)
 		}
@@ -849,7 +969,7 @@ func TestRunDoesNotReprintAStreamedReply(t *testing.T) {
 	var out bytes.Buffer
 	bot := &fakeStepper{reply: "already streamed"}
 
-	run(context.Background(), replFor("hi\n"), &out, cfgFor("m"), "", bot, true)
+	run(context.Background(), replFor("hi\n"), &out, cfgFor("m"), "", bot, true, "", nil)
 
 	// The client's sink wrote the text; run must not write it again.
 	if strings.Contains(out.String(), "already streamed") {
@@ -873,5 +993,648 @@ func TestRunMainStreamsIntoStdoutByDefault(t *testing.T) {
 	}
 	if strings.Count(out.String(), "streamed answer") != 1 {
 		t.Fatalf("stdout = %q, want the reply printed exactly once", out.String())
+	}
+}
+
+func TestCommandPlanTogglesAndReportsState(t *testing.T) {
+	var out bytes.Buffer
+	bot := &fakeStepper{}
+
+	command(&out, "/plan", cfgFor("m"), "", bot)
+	if !bot.planMode {
+		t.Fatal("bot.planMode = false after /plan, want it toggled on")
+	}
+	if !strings.Contains(out.String(), "plan mode: on") {
+		t.Fatalf("output = %q, want the on state reported", out.String())
+	}
+
+	out.Reset()
+	command(&out, "/plan", cfgFor("m"), "", bot)
+	if bot.planMode {
+		t.Fatal("bot.planMode = true after second /plan, want it toggled back off")
+	}
+	if !strings.Contains(out.String(), "plan mode: off") {
+		t.Fatalf("output = %q, want the off state reported", out.String())
+	}
+}
+
+func TestRunMainStartsInPlanModeWithTheFlag(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	writeGitRepoForTest(t)
+	diff := "--- a/target.txt\n+++ b/target.txt\n@@ -1 +1 @@\n-alpha\n+omega\n"
+	oneShotServer(t, []string{
+		`{"message":{"role":"assistant","tool_calls":[{"function":{"name":"apply_patch","arguments":` +
+			mustJSONMain(t, map[string]any{"diff": diff}) + `}}]},"done":true}`,
+		`{"message":{"role":"assistant","content":"Left it alone."},"done":true}`,
+	})
+
+	var out, errOut bytes.Buffer
+	code := runMain([]string{"-p", "change it", "--yes", "--plan"}, strings.NewReader(""), &out, &errOut)
+
+	if code != 0 {
+		t.Fatalf("runMain() = %d, want 0", code)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "target.txt")); err != nil {
+		t.Fatal("target.txt missing")
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "target.txt"))
+	if err != nil || string(b) != "alpha\n" {
+		t.Fatalf("target.txt = %q (err %v), want plan mode to override --yes", b, err)
+	}
+}
+
+func TestRunMainRespectsPlanModeDefaultFromConfig(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	writeGitRepoForTest(t)
+	cfgPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(cfgPath, []byte(`{"plan_mode_default": true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("METRON_CONFIG", cfgPath)
+
+	diff := "--- a/target.txt\n+++ b/target.txt\n@@ -1 +1 @@\n-alpha\n+omega\n"
+	var turn int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		script := []string{
+			`{"message":{"role":"assistant","tool_calls":[{"function":{"name":"apply_patch","arguments":` +
+				mustJSONMain(t, map[string]any{"diff": diff}) + `}}]},"done":true}`,
+			`{"message":{"role":"assistant","content":"Left it alone."},"done":true}`,
+		}
+		if turn < len(script) {
+			_, _ = w.Write([]byte(script[turn]))
+			turn++
+		}
+	}))
+	defer srv.Close()
+	t.Setenv("OLLAMA_HOST", srv.URL+"/api/chat")
+	t.Setenv("OLLAMA_MODEL", "m")
+
+	var out, errOut bytes.Buffer
+	code := runMain([]string{"-p", "change it", "--yes"}, strings.NewReader(""), &out, &errOut)
+
+	if code != 0 {
+		t.Fatalf("runMain() = %d, want 0", code)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "target.txt"))
+	if err != nil || string(b) != "alpha\n" {
+		t.Fatalf("target.txt = %q (err %v), want the config default to enable plan mode even with --yes", b, err)
+	}
+}
+
+func TestRunPrintsTheInstructionsBanner(t *testing.T) {
+	var out bytes.Buffer
+
+	run(context.Background(), replFor("exit\n"), &out, cfgFor("m"), "", &fakeStepper{}, false, "some instructions", nil)
+
+	if !strings.Contains(out.String(), "project instructions: AGENTS.md (17 bytes)") {
+		t.Fatalf("output = %q, want the instructions banner with the configured filename and byte count", out.String())
+	}
+}
+
+func TestRunOmitsTheInstructionsBannerWhenThereAreNone(t *testing.T) {
+	var out bytes.Buffer
+
+	run(context.Background(), replFor("exit\n"), &out, cfgFor("m"), "", &fakeStepper{}, false, "", nil)
+
+	if strings.Contains(out.String(), "project instructions") {
+		t.Fatalf("output = %q, want no banner when nothing was loaded", out.String())
+	}
+}
+
+func TestRunMainLoadsAgentsMdIntoTheSystemPrompt(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := os.WriteFile("AGENTS.md", []byte("Always mention bananas."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var seenSystem string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if len(req.Messages) > 0 {
+			seenSystem = req.Messages[0].Content
+		}
+		_, _ = w.Write([]byte(`{"message":{"role":"assistant","content":"ok"},"done":true}`))
+	}))
+	defer srv.Close()
+	t.Setenv("METRON_CONFIG", "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("OLLAMA_HOST", srv.URL+"/api/chat")
+	t.Setenv("OLLAMA_MODEL", "m")
+
+	var out, errOut bytes.Buffer
+	code := runMain([]string{"-p", "hi"}, strings.NewReader(""), &out, &errOut)
+
+	if code != 0 {
+		t.Fatalf("runMain() = %d, want 0", code)
+	}
+	if !strings.Contains(seenSystem, "Always mention bananas.") {
+		t.Fatalf("system prompt sent to the model = %q, want AGENTS.md content included", seenSystem)
+	}
+}
+
+func TestRunMainReportsUnreadableInstructionsFile(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := os.WriteFile("AGENTS.md", []byte("x"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(filepath.Join(dir, "AGENTS.md"), 0o644) })
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores file permissions")
+	}
+	t.Setenv("METRON_CONFIG", "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	var out, errOut bytes.Buffer
+	code := runMain(nil, strings.NewReader("exit\n"), &out, &errOut)
+
+	if code != 1 {
+		t.Fatalf("runMain() = %d, want 1", code)
+	}
+	if !strings.Contains(errOut.String(), "instructions error") {
+		t.Fatalf("stderr = %q, want the read failure reported", errOut.String())
+	}
+}
+
+func TestRunMainWiresThePreToolHookAndDeniesATool(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	cfgPath := filepath.Join(dir, "config.json")
+	// Deny list_files specifically; everything else should still work.
+	hookScript := `input=$(cat); case "$input" in *'"tool":"list_files"'*) echo "no listing here" >&2; exit 1;; *) exit 0;; esac`
+	cfgJSON, err := json.Marshal(map[string]any{"pre_tool_hook": hookScript})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfgPath, cfgJSON, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("METRON_CONFIG", cfgPath)
+
+	oneShotServer(t, []string{
+		`{"message":{"role":"assistant","tool_calls":[{"function":{"name":"list_files","arguments":{}}}]},"done":true}`,
+		`{"message":{"role":"assistant","content":"Blocked."},"done":true}`,
+	})
+
+	var out, errOut bytes.Buffer
+	code := runMain([]string{"-p", "list files"}, strings.NewReader(""), &out, &errOut)
+
+	if code != 0 {
+		t.Fatalf("runMain() = %d, want 0", code)
+	}
+	if out.String() != "Blocked.\n" {
+		t.Fatalf("stdout = %q, want the model's final answer", out.String())
+	}
+}
+
+func TestPreToolHookReturnsNilWhenUnconfigured(t *testing.T) {
+	if got := preToolHook(""); got != nil {
+		t.Fatal("preToolHook(\"\") returned a non-nil hook, want nil")
+	}
+}
+
+func TestPreToolHookReportsAnUnrunnableCommandAsADenial(t *testing.T) {
+	oldPath := os.Getenv("PATH")
+	t.Setenv("PATH", t.TempDir())
+	t.Cleanup(func() { os.Setenv("PATH", oldPath) })
+
+	hook := preToolHook("exit 0")
+	allowed, reason := hook("list_files", nil)
+
+	if allowed {
+		t.Fatal("allowed = true, want an unrunnable hook command to fail closed")
+	}
+	if !strings.Contains(reason, "failed to run") {
+		t.Fatalf("reason = %q, want the run failure reported", reason)
+	}
+}
+
+func TestPreToolHookReturnsTheDenialReason(t *testing.T) {
+	hook := preToolHook(`echo "no" >&2; exit 1`)
+	allowed, reason := hook("apply_patch", nil)
+
+	if allowed {
+		t.Fatal("allowed = true, want the configured command's exit code respected")
+	}
+	if reason != "no" {
+		t.Fatalf("reason = %q, want the command's stderr", reason)
+	}
+}
+
+func TestCommandUndoPrintsTheResult(t *testing.T) {
+	var out bytes.Buffer
+	bot := &fakeStepper{undoMsg: "Reverted the last applied patch."}
+
+	command(&out, "/undo", cfgFor("m"), "", bot)
+
+	if bot.undoCalls != 1 {
+		t.Fatalf("Undo() called %d times, want 1", bot.undoCalls)
+	}
+	if !strings.Contains(out.String(), "Reverted the last applied patch.") {
+		t.Fatalf("output = %q, want the undo result printed", out.String())
+	}
+}
+
+func TestCommandUndoReportsFailure(t *testing.T) {
+	var out bytes.Buffer
+	bot := &fakeStepper{undoErr: errors.New("git unavailable")}
+
+	command(&out, "/undo", cfgFor("m"), "", bot)
+
+	if !strings.Contains(out.String(), "Error:") || !strings.Contains(out.String(), "git unavailable") {
+		t.Fatalf("output = %q, want the error reported", out.String())
+	}
+}
+
+func TestRunMainUndoesAnAppliedPatch(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	writeGitRepoForTest(t)
+	diff := "--- a/target.txt\n+++ b/target.txt\n@@ -1 +1 @@\n-alpha\n+omega\n"
+	var turn int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		script := []string{
+			`{"message":{"role":"assistant","tool_calls":[{"function":{"name":"apply_patch","arguments":` +
+				mustJSONMain(t, map[string]any{"diff": diff}) + `}}]},"done":true}`,
+			`{"message":{"role":"assistant","content":"Changed it."},"done":true}`,
+		}
+		if turn < len(script) {
+			_, _ = w.Write([]byte(script[turn]))
+			turn++
+		}
+	}))
+	defer srv.Close()
+	t.Setenv("METRON_CONFIG", "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("OLLAMA_HOST", srv.URL+"/api/chat")
+	t.Setenv("OLLAMA_MODEL", "m")
+
+	var out, errOut bytes.Buffer
+	code := runMain([]string{"--yes"}, strings.NewReader("change it\n/undo\nexit\n"), &out, &errOut)
+
+	if code != 0 {
+		t.Fatalf("runMain() = %d, want 0", code)
+	}
+	if !strings.Contains(out.String(), "Reverted the last applied patch.") {
+		t.Fatalf("output = %q, want the /undo result printed", out.String())
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "target.txt"))
+	if err != nil || string(b) != "alpha\n" {
+		t.Fatalf("target.txt = %q (err %v), want it reverted", b, err)
+	}
+}
+
+func TestRunMainAutosavesOnExitAndResumesWithContinue(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	oneShotServer(t, []string{
+		`{"message":{"role":"assistant","content":"first answer"},"done":true}`,
+	})
+
+	var out, errOut bytes.Buffer
+	code := runMain(nil, strings.NewReader("first question\nexit\n"), &out, &errOut)
+	if code != 0 {
+		t.Fatalf("runMain() = %d, want 0", code)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".metron", "session.json")); err != nil {
+		t.Fatalf("session file not created: %v", err)
+	}
+
+	var out2, errOut2 bytes.Buffer
+	code = runMain([]string{"--continue"}, strings.NewReader("/history\nexit\n"), &out2, &errOut2)
+	if code != 0 {
+		t.Fatalf("runMain(--continue) = %d, want 0", code)
+	}
+	// system + user "first question" + assistant "first answer" = 3 messages.
+	if !strings.Contains(out2.String(), "history: 3 messages") {
+		t.Fatalf("output = %q, want the resumed session to carry the prior conversation", out2.String())
+	}
+}
+
+func TestRunMainContinueReportsAMissingSession(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	t.Setenv("METRON_CONFIG", "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	var out, errOut bytes.Buffer
+	code := runMain([]string{"--continue"}, strings.NewReader(""), &out, &errOut)
+
+	if code != 1 {
+		t.Fatalf("runMain(--continue) = %d, want 1 with no saved session", code)
+	}
+	if !strings.Contains(errOut.String(), "continue error") {
+		t.Fatalf("stderr = %q, want the missing-session error reported", errOut.String())
+	}
+}
+
+func TestSaveSessionWarnsOnFailureWithoutStoppingTheRepl(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	// A file where the .metron directory needs to go, so MkdirAll fails.
+	if err := os.WriteFile(".metron", []byte("blocking"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	saveSession(&out, &fakeStepper{})
+
+	if !strings.Contains(out.String(), "warning: could not save session") {
+		t.Fatalf("output = %q, want the save failure reported as a warning", out.String())
+	}
+}
+
+func TestLoadCommandsMissingDirIsNotAnError(t *testing.T) {
+	dir := t.TempDir()
+
+	got, err := loadCommands(filepath.Join(dir, "nope"), 4096)
+
+	if err != nil {
+		t.Fatalf("loadCommands() error = %v, want a missing directory treated as optional", err)
+	}
+	if got != nil {
+		t.Fatalf("loadCommands() = %v, want nil for a missing directory", got)
+	}
+}
+
+func TestLoadCommandsReadsMarkdownFilesOnly(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "review.md"), []byte("Review $ARGUMENTS for bugs."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("ignored"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "subdir.md"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := loadCommands(dir, 4096)
+
+	if err != nil {
+		t.Fatalf("loadCommands() error = %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("loadCommands() = %v, want only the one .md file", got)
+	}
+	if got["review"] != "Review $ARGUMENTS for bugs." {
+		t.Fatalf("loadCommands()[\"review\"] = %q, want the file content keyed by its stem", got["review"])
+	}
+}
+
+func TestLoadCommandsTruncatesAtTheByteBudget(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "big.md"), []byte(strings.Repeat("x", 100)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := loadCommands(dir, 10)
+
+	if err != nil {
+		t.Fatalf("loadCommands() error = %v", err)
+	}
+	if !strings.HasPrefix(got["big"], strings.Repeat("x", 10)) || !strings.Contains(got["big"], "truncated") {
+		t.Fatalf("loadCommands()[\"big\"] = %q, want it clipped and marked", got["big"])
+	}
+}
+
+func TestLoadCommandsReportsAnUnreadableFile(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores file permissions")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bad.md")
+	if err := os.WriteFile(path, []byte("x"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(path, 0o644) })
+
+	_, err := loadCommands(dir, 4096)
+
+	if err == nil {
+		t.Fatal("loadCommands() error = nil, want the read failure reported")
+	}
+}
+
+func TestExpandCommandSubstitutesArguments(t *testing.T) {
+	got := expandCommand("Review $ARGUMENTS for bugs.", "internal/tools/slice.go")
+	want := "Review internal/tools/slice.go for bugs."
+	if got != want {
+		t.Fatalf("expandCommand() = %q, want %q", got, want)
+	}
+}
+
+func TestExpandCommandLeavesTemplateAloneWithoutThePlaceholder(t *testing.T) {
+	got := expandCommand("Summarize recent changes.", "ignored")
+	if got != "Summarize recent changes." {
+		t.Fatalf("expandCommand() = %q, want the template unchanged", got)
+	}
+}
+
+func TestRunExpandsACustomCommandAndSendsItToTheModel(t *testing.T) {
+	commands := map[string]string{"review": "Review $ARGUMENTS for bugs."}
+	bot := &fakeStepper{reply: "looks fine"}
+
+	run(context.Background(), replFor("/review slice.go\nexit\n"), &bytes.Buffer{}, cfgFor("m"), "", bot, false, "", commands)
+
+	if len(bot.prompts) != 1 || bot.prompts[0] != "Review slice.go for bugs." {
+		t.Fatalf("prompts sent = %v, want the expanded template", bot.prompts)
+	}
+}
+
+func TestRunNeverLetsACustomCommandShadowABuiltin(t *testing.T) {
+	commands := map[string]string{"reset": "This should never run."}
+	bot := &fakeStepper{}
+
+	run(context.Background(), replFor("/reset\nexit\n"), &bytes.Buffer{}, cfgFor("m"), "", bot, false, "", commands)
+
+	if bot.resets != 1 {
+		t.Fatalf("resets = %d, want the real /reset to run instead of the custom command", bot.resets)
+	}
+	if len(bot.prompts) != 0 {
+		t.Fatalf("prompts sent = %v, want the custom command never reaching the model", bot.prompts)
+	}
+}
+
+func TestRunStillHandlesBareExitAndUnknownSlashCommands(t *testing.T) {
+	var out bytes.Buffer
+	bot := &fakeStepper{}
+
+	run(context.Background(), replFor("exit\n"), &out, cfgFor("m"), "", bot, false, "", nil)
+
+	if len(bot.prompts) != 0 {
+		t.Fatalf("prompts sent = %v, want bare \"exit\" to quit without reaching the model", bot.prompts)
+	}
+
+	out.Reset()
+	bot = &fakeStepper{}
+	run(context.Background(), replFor("/nonexistent\nexit\n"), &out, cfgFor("m"), "", bot, false, "", nil)
+	if !strings.Contains(out.String(), "Unknown command") {
+		t.Fatalf("output = %q, want an unrecognised slash command reported as unknown", out.String())
+	}
+}
+
+func TestRunMainLoadsAndExpandsCustomCommands(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := os.MkdirAll(".metron/commands", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(".metron/commands/review.md", []byte("Review $ARGUMENTS for bugs."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var seenUser string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		for _, m := range req.Messages {
+			if m.Role == "user" {
+				seenUser = m.Content
+			}
+		}
+		_, _ = w.Write([]byte(`{"message":{"role":"assistant","content":"ok"},"done":true}`))
+	}))
+	defer srv.Close()
+	t.Setenv("METRON_CONFIG", "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("OLLAMA_HOST", srv.URL+"/api/chat")
+	t.Setenv("OLLAMA_MODEL", "m")
+
+	var out, errOut bytes.Buffer
+	code := runMain(nil, strings.NewReader("/review main.go\nexit\n"), &out, &errOut)
+
+	if code != 0 {
+		t.Fatalf("runMain() = %d, want 0", code)
+	}
+	if seenUser != "Review main.go for bugs." {
+		t.Fatalf("user message sent to the model = %q, want the expanded template", seenUser)
+	}
+}
+
+func TestRunMainReportsUnreadableCommandsDirectory(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores file permissions")
+	}
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := os.MkdirAll(".metron/commands", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(".metron/commands/bad.md", []byte("x"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(".metron/commands/bad.md", 0o644) })
+	t.Setenv("METRON_CONFIG", "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	var out, errOut bytes.Buffer
+	code := runMain(nil, strings.NewReader("exit\n"), &out, &errOut)
+
+	if code != 1 {
+		t.Fatalf("runMain() = %d, want 1", code)
+	}
+	if !strings.Contains(errOut.String(), "commands error") {
+		t.Fatalf("stderr = %q, want the read failure reported", errOut.String())
+	}
+}
+
+func TestLoadCommandsReportsAnUnreadableDirectory(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores file permissions")
+	}
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "commands")
+	if err := os.Mkdir(dir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o755) })
+
+	_, err := loadCommands(dir, 4096)
+
+	if err == nil {
+		t.Fatal("loadCommands() error = nil, want the unreadable directory reported")
+	}
+}
+
+func TestNewClientSelectsOllamaByDefault(t *testing.T) {
+	cfg := config.Defaults()
+
+	client := newClient(cfg, false, io.Discard)
+
+	if _, ok := client.(*ollama.Client); !ok {
+		t.Fatalf("newClient() = %T, want *ollama.Client for provider %q", client, cfg.Provider)
+	}
+}
+
+func TestNewClientSelectsOpenAIWhenConfigured(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Provider = "openai"
+
+	client := newClient(cfg, false, io.Discard)
+
+	if _, ok := client.(*openai.Client); !ok {
+		t.Fatalf("newClient() = %T, want *openai.Client for provider %q", client, cfg.Provider)
+	}
+}
+
+func TestRunMainTalksToAnOpenAICompatibleServer(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"hi from openai-compatible"}}]}`)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	t.Chdir(dir)
+	cfgPath := filepath.Join(dir, "config.json")
+	cfgJSON, err := json.Marshal(map[string]any{
+		"provider": "openai",
+		"endpoint": srv.URL + "/v1/chat/completions",
+		"model":    "local-model",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfgPath, cfgJSON, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("METRON_CONFIG", cfgPath)
+
+	var out, errOut bytes.Buffer
+	code := runMain([]string{"-p", "hi"}, strings.NewReader(""), &out, &errOut)
+
+	if code != 0 {
+		t.Fatalf("runMain() = %d, want 0", code)
+	}
+	if gotPath != "/v1/chat/completions" {
+		t.Fatalf("request path = %q, want /v1/chat/completions", gotPath)
+	}
+	if out.String() != "hi from openai-compatible\n" {
+		t.Fatalf("stdout = %q, want the model's answer", out.String())
+	}
+}
+
+func TestNewClientWiresTheSinkWhenStreamed(t *testing.T) {
+	var buf bytes.Buffer
+	for _, provider := range []string{"ollama", "openai"} {
+		cfg := config.Defaults()
+		cfg.Provider = provider
+		newClient(cfg, true, &buf) // just confirm it doesn't panic wiring the sink through
 	}
 }

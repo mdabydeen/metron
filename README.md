@@ -1,7 +1,9 @@
 # metron
 
-A minimal, terminal-based coding agent that talks to a **local** [Ollama](https://ollama.com)
-model. Its one defining constraint is **token discipline**: the model never reads a whole
+A minimal, terminal-based coding agent that talks to a **local** model server --
+[Ollama](https://ollama.com) by default, or any server speaking the OpenAI-compatible chat
+completions format (llama.cpp, vLLM, LM Studio). Its one defining constraint is
+**token discipline**: the model never reads a whole
 file. Every look at your code goes through a narrow, budgeted tool, and large tool output is
 purged from the conversation as soon as the turn that needed it is over.
 
@@ -45,9 +47,10 @@ the table. The tool surface is what makes that instruction enforceable rather th
 ## Requirements
 
 - **Go 1.26+** to build.
-- **A running Ollama server** with a **tool-capable** model pulled. Tool calling is not
-  optional here — without it the agent cannot see your code at all. Check with
-  `curl -s localhost:11434/api/tags | grep tools`.
+- **A running local model server** with a **tool-capable** model loaded. Tool calling is not
+  optional here — without it the agent cannot see your code at all. For Ollama (the default),
+  check with `curl -s localhost:11434/api/tags | grep tools`; for an OpenAI-compatible server
+  (llama.cpp, vLLM, LM Studio), check its own tool-calling documentation.
 - **[ripgrep](https://github.com/BurntSushi/ripgrep)** (`rg`) — required by `search_text`.
 - **[Universal Ctags](https://ctags.io)** — required by `find_symbol`. The BSD `ctags`
   shipped with macOS/Xcode does **not** work; it rejects the `--fields=+nK` flag metron
@@ -103,6 +106,8 @@ written to disk.
 | `-p`, `--prompt` | run one request non-interactively and exit |
 | `--yes` | apply patches without asking (required by `-p` to edit files) |
 | `--version` | print the version and exit |
+| `--plan` | start in read-only mode (apply_patch is refused) |
+| `--continue` | resume the last saved session (`.metron/session.json`) |
 | `-h` | list the flags |
 
 ### Commands
@@ -113,6 +118,8 @@ written to disk.
 | `/config` | print the effective settings and which file they came from |
 | `/reset` | clear the conversation history, keeping the system prompt |
 | `/history` | show how many messages and bytes the session is carrying |
+| `/plan` | toggle read-only mode — apply_patch is refused while it's on |
+| `/undo` | revert the most recently applied patch via `git apply -R` |
 | `/tags` | rebuild the ctags index — do this after a big refactor |
 | `/exit` | quit (also `exit`, `quit`, `/quit`, or Ctrl-D) |
 
@@ -127,6 +134,75 @@ not apply cleanly, so a bad patch leaves your files untouched. Even so, **work o
 and commit before you start**, so `git diff` shows you exactly what the model did.
 
 Set `auto_approve_patches` to `true` to skip the prompt.
+
+`/undo` reverts the last successfully-applied patch — REPL-only, not a model tool, since the
+five-tool budget is deliberate. metron tracks up to `max_undo_stack` applied diffs per session
+(default 20) and reverts them one at a time, most recent first, via `git apply -R`. If the
+working tree has changed since a patch was applied, the revert fails cleanly as a dry-run report
+rather than corrupting anything, and that diff stays on the stack.
+
+For a safe, read-only session — asking questions or exploring without any risk of a write —
+toggle `/plan` or start with `--plan`. While it's on, `apply_patch` is refused unconditionally,
+before the diff is even shown: it overrides `--yes` and `auto_approve_patches` rather than
+competing with them. Set `plan_mode_default` to `true` to make it the default posture.
+
+### Project instructions
+
+Drop an `AGENTS.md` at the repository root and metron reads it once at startup, capped at
+`max_instructions_bytes` (default 4096), and appends it to the system prompt — the model gets
+project-specific context (house style, things not to touch, how to run tests) without spending a
+`view_slice` turn to read it itself. A missing file is not an error; the feature is simply
+inactive. The REPL banner echoes what was loaded: `project instructions: AGENTS.md (312 bytes)`.
+
+### Custom commands
+
+Drop a prompt template at `.metron/commands/<name>.md` and it becomes `/<name>` in the REPL:
+typing it sends the file's content to the model as if you'd typed it yourself, substituting
+`$ARGUMENTS` with whatever followed the command name.
+
+```
+$ cat .metron/commands/review.md
+Review $ARGUMENTS for obvious bugs and report them concisely.
+
+metron > /review internal/tools/slice.go
+```
+
+A custom command can never shadow a built-in — `/reset` always resets, even if you have a
+`.metron/commands/reset.md`. Each template is capped at `max_command_bytes` (default 4096),
+truncated with a marker if it runs over.
+
+### Resuming a session
+
+Conversation history is lost when you exit, unless you ask metron to keep it: it autosaves to
+`.metron/session.json` (gitignored, per-repository) on every clean exit — `/exit` or EOF — and
+`--continue` loads it back before the REPL starts, so the model picks up with full prior
+context. There's one slot, not named multi-session management: each autosave overwrites the
+last. `--continue` with nothing saved yet is reported as an error rather than silently starting
+fresh.
+
+### Hooks
+
+`pre_tool_hook` is a shell command consulted before every tool call — all five of them, unlike
+`apply_patch`'s approval prompt, which is patch-only. Leave it unset (the default) and it has no
+effect. When set, metron runs it via `sh -c` for each tool call, piping
+`{"tool": "<name>", "args": {...}}` on stdin. Exit `0` allows the call; any other exit code
+denies it, and the command's stderr becomes the reason the model sees, so it can try a different
+approach rather than retrying blindly.
+
+```json
+{ "pre_tool_hook": "jq -e '.tool != \"apply_patch\" or (.args.diff | test(\"go.mod\") | not)'" }
+```
+
+Plan mode (below) is checked first and unconditionally, so a hook can never re-allow a patch that
+plan mode refused. This runs arbitrary shell code with your permissions on every tool call —
+the same "work on a clean branch" caution `apply_patch` already carries applies here too.
+
+**A `pre_tool_hook` set in the project-local `./.metron.json` is refused by default.** That file
+can arrive inside a repository you cloned, not just one you wrote yourself, so metron will not run
+a hook sourced from it until you either move the setting to your user config
+(`~/.config/metron/config.json`) or explicitly opt in with `METRON_TRUST_PROJECT_HOOK=1` for
+repositories you trust. A `pre_tool_hook` in the user config always runs, since that file is
+yours.
 
 ### Interrupting a reply
 
@@ -159,8 +235,9 @@ cp metron.example.json .metron.json
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `endpoint` | `http://localhost:11434/api/chat` | Ollama chat endpoint, path included |
+| `endpoint` | `http://localhost:11434/api/chat` | chat endpoint, full path included |
 | `model` | `qwen2.5-coder:32b` | model name to request |
+| `provider` | `ollama` | wire format: `ollama` or `openai` (see below) |
 | `timeout_seconds` | `180` | seconds of *silence* before a model call is abandoned |
 | `stream` | `true` | print the reply as it is generated |
 | `temperature` | `0.1` | sampling temperature |
@@ -172,9 +249,15 @@ cp metron.example.json .metron.json
 | `max_slice_lines` | `120` | widest span `view_slice` will read |
 | `max_line_chars` | `500` | longest single line `view_slice` will emit |
 | `auto_approve_patches` | `false` | apply patches without showing the diff and asking |
+| `plan_mode_default` | `false` | start every session in read-only mode |
+| `pre_tool_hook` | `""` (disabled) | shell command consulted before every tool call |
+| `instructions_file` | `AGENTS.md` | project-instructions file read into the system prompt |
+| `max_instructions_bytes` | `4096` | size cap on the instructions file |
 | `search_max_matches` | `10` | total `search_text` results |
 | `search_max_per_file` | `2` | `search_text` results per file |
 | `list_max_entries` | `60` | paths `list_files` will return |
+| `max_undo_stack` | `20` | applied patches `/undo` can step back through |
+| `max_command_bytes` | `4096` | size cap on each custom command template |
 
 A file that exists but cannot be read or parsed is a startup error, not a silent fallback —
 including unknown keys, so a typo like `"modle"` is reported instead of ignored. Values are
@@ -182,6 +265,14 @@ validated (positive budgets, `top_p` in `(0, 1]`) before the agent starts.
 
 **The default model is probably not yours.** `qwen2.5-coder:32b` is a placeholder; set `model`
 to something you have actually pulled and that reports the `tools` capability.
+
+**Other local model servers.** Set `provider` to `openai` to talk to any server speaking the
+OpenAI-compatible chat completions format — llama.cpp's server, vLLM, LM Studio — instead of
+Ollama's native API. `endpoint` then points at that server's own path (typically ending in
+`/v1/chat/completions`), and `model` is whatever name the server expects. Both providers produce
+the same metron behaviour: same tools, same budgets, same streaming and token accounting. This
+stays local-only by design — metron has no cloud-provider support, only a second wire format for
+a second kind of local server.
 
 **`timeout_seconds` bounds silence, not total generation time.** It is an idle watchdog: it
 resets every time a chunk arrives, so a reply that takes ten minutes but keeps producing tokens
@@ -266,8 +357,10 @@ error, since that is an environment fault rather than a bad patch.
 main.go              REPL and commands. No conversation state lives here.
 internal/config      Settings: defaults, JSON file, environment, validation.
 internal/ollama      HTTP client for Ollama's /api/chat, plus the shared wire types.
+internal/openai      HTTP client for the OpenAI-compatible chat completions format.
 internal/agent       The agent loop, the system prompt, tool schemas, compaction.
 internal/tools       The five tools plus the startup dependency check.
+internal/session     Conversation persistence for --continue.
 ```
 
 Seams are interfaces, so each layer can be driven in isolation: `agent.New` takes a `Chatter`

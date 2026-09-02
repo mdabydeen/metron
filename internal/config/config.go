@@ -20,6 +20,11 @@ type Config struct {
 	// Connection
 	Endpoint string `json:"endpoint"`
 	Model    string `json:"model"`
+	// Provider selects the wire format: "ollama" speaks Ollama's /api/chat,
+	// "openai" speaks the OpenAI chat-completions format used by llama.cpp,
+	// vLLM, LM Studio and similar local servers. Both are local-only --
+	// Endpoint still has to point at a server on your machine or network.
+	Provider string `json:"provider"`
 	// TimeoutSeconds bounds silence, not total generation time: a streamed
 	// reply that keeps arriving is never cut off, however long it takes.
 	TimeoutSeconds int  `json:"timeout_seconds"`
@@ -41,35 +46,60 @@ type Config struct {
 	SearchMaxMatches int `json:"search_max_matches"`
 	SearchMaxPerFile int `json:"search_max_per_file"`
 	ListMaxEntries   int `json:"list_max_entries"`
+	MaxUndoStack     int `json:"max_undo_stack"`
 
 	// Safety
-	AutoApprovePatches bool `json:"auto_approve_patches"`
+	AutoApprovePatches bool   `json:"auto_approve_patches"`
+	PlanModeDefault    bool   `json:"plan_mode_default"`
+	PreToolHook        string `json:"pre_tool_hook"`
+
+	// Project context
+	InstructionsFile     string `json:"instructions_file"`
+	MaxInstructionsBytes int    `json:"max_instructions_bytes"`
+	MaxCommandBytes      int    `json:"max_command_bytes"`
 }
 
 // Defaults returns the built-in configuration.
 func Defaults() Config {
 	return Config{
-		Endpoint:           "http://localhost:11434/api/chat",
-		Model:              "qwen2.5-coder:32b",
-		TimeoutSeconds:     180,
-		Stream:             true,
-		Temperature:        0.1,
-		TopP:               0.95,
-		NumCtx:             16384,
-		MaxTurns:           10,
-		CompactThreshold:   400,
-		MaxHistoryMessages: 60,
-		MaxSliceLines:      120,
-		MaxLineChars:       500,
-		SearchMaxMatches:   10,
-		SearchMaxPerFile:   2,
-		ListMaxEntries:     60,
-		AutoApprovePatches: false,
+		Endpoint:             "http://localhost:11434/api/chat",
+		Model:                "qwen2.5-coder:32b",
+		Provider:             "ollama",
+		TimeoutSeconds:       180,
+		Stream:               true,
+		Temperature:          0.1,
+		TopP:                 0.95,
+		NumCtx:               16384,
+		MaxTurns:             10,
+		CompactThreshold:     400,
+		MaxHistoryMessages:   60,
+		MaxSliceLines:        120,
+		MaxLineChars:         500,
+		SearchMaxMatches:     10,
+		SearchMaxPerFile:     2,
+		ListMaxEntries:       60,
+		MaxUndoStack:         20,
+		AutoApprovePatches:   false,
+		PlanModeDefault:      false,
+		InstructionsFile:     "AGENTS.md",
+		MaxInstructionsBytes: 4096,
+		MaxCommandBytes:      4096,
 	}
 }
 
 // ProjectFile is the config file metron looks for in the working directory.
 const ProjectFile = ".metron.json"
+
+// IsProjectFile reports whether path is the project-local config file found
+// by searching the working directory, as opposed to the user-level config or
+// an explicit $METRON_CONFIG override. A repository's own .metron.json is
+// not something the operator necessarily wrote or reviewed -- cloning an
+// untrusted repo and running metron in it loads whatever that file contains
+// with no prompt -- so callers use this to require extra confirmation before
+// honoring security-sensitive keys (pre_tool_hook) sourced from it.
+func IsProjectFile(path string) bool {
+	return path == ProjectFile
+}
 
 // Search returns the config file paths metron consults, highest priority
 // first. An explicit path (from METRON_CONFIG) short-circuits the search.
@@ -132,6 +162,31 @@ func Load() (Config, string, error) {
 	return cfg, used, nil
 }
 
+// instructionsTruncatedMarker ends the injected project instructions when they
+// are cut off at max_instructions_bytes, so the model can tell a shortened
+// file from a complete one -- the same convention view_slice and search_text
+// use for their own truncation.
+const instructionsTruncatedMarker = "\n[instructions truncated]"
+
+// LoadInstructions reads a project-instructions file (AGENTS.md by default)
+// and caps it at maxBytes. A missing file is not an error -- the feature is
+// optional, same as Preflight's missing-binary warnings -- it simply means no
+// instructions are injected into the system prompt.
+func LoadInstructions(path string, maxBytes int) (string, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("read instructions %s: %w", path, err)
+	}
+	text := strings.TrimRight(string(data), "\n")
+	if maxBytes > 0 && len(text) > maxBytes {
+		text = text[:maxBytes] + instructionsTruncatedMarker
+	}
+	return text, nil
+}
+
 // Validate rejects settings that would make the agent misbehave rather than
 // merely perform differently.
 func (c Config) Validate() error {
@@ -141,6 +196,9 @@ func (c Config) Validate() error {
 	}
 	if strings.TrimSpace(c.Model) == "" {
 		problems = append(problems, "model must not be empty")
+	}
+	if c.Provider != "ollama" && c.Provider != "openai" {
+		problems = append(problems, fmt.Sprintf(`provider must be "ollama" or "openai" (got %q)`, c.Provider))
 	}
 	for _, check := range []struct {
 		name string
@@ -156,6 +214,9 @@ func (c Config) Validate() error {
 		{"search_max_matches", c.SearchMaxMatches},
 		{"search_max_per_file", c.SearchMaxPerFile},
 		{"list_max_entries", c.ListMaxEntries},
+		{"max_undo_stack", c.MaxUndoStack},
+		{"max_instructions_bytes", c.MaxInstructionsBytes},
+		{"max_command_bytes", c.MaxCommandBytes},
 	} {
 		if check.val <= 0 {
 			problems = append(problems, fmt.Sprintf("%s must be > 0 (got %d)", check.name, check.val))

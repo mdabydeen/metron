@@ -88,7 +88,7 @@ func TestEndToEndPatchSession(t *testing.T) {
 	var out bytes.Buffer
 	cfg := config.Defaults()
 	cfg.Model = "e2e-model"
-	run(context.Background(), bufio.NewScanner(strings.NewReader("make Greet say hola\nexit\n")), &out, cfg, "", bot, false)
+	run(context.Background(), bufio.NewScanner(strings.NewReader("make Greet say hola\nexit\n")), &out, cfg, "", bot, false, "", nil)
 
 	if turn != len(script) {
 		t.Fatalf("model was called %d times, want %d", turn, len(script))

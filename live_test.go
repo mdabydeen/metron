@@ -10,6 +10,11 @@
 // The model choice is deliberate: metron's default (qwen2.5-coder:32b) is
 // often not the model an operator actually has pulled, so the test discovers a
 // tool-capable model from /api/tags unless METRON_TEST_MODEL says otherwise.
+//
+// These tests are Ollama-only: they build an *ollama.Client directly rather
+// than going through the provider switch, since /api/tags discovery is
+// Ollama-specific. internal/openai's own client_test.go covers the
+// OpenAI-compatible wire format in isolation.
 package main
 
 import (
@@ -132,6 +137,7 @@ func liveSetup(t *testing.T) (*countingChatter, *agent.Agent, config.Config) {
 		SearchMaxMatches:   cfg.SearchMaxMatches,
 		SearchMaxPerFile:   cfg.SearchMaxPerFile,
 		ListMaxEntries:     cfg.ListMaxEntries,
+		MaxUndoStack:       cfg.MaxUndoStack,
 	}), cfg
 }
 

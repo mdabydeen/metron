@@ -1,6 +1,7 @@
 {
   "endpoint": "http://localhost:11434/api/chat",
   "model": "qwen2.5-coder:32b",
+  "provider": "ollama",
   "timeout_seconds": 180,
   "stream": true,
 
@@ -17,6 +18,13 @@
   "search_max_matches": 10,
   "search_max_per_file": 2,
   "list_max_entries": 60,
+  "max_undo_stack": 20,
 
-  "auto_approve_patches": false
+  "auto_approve_patches": false,
+  "plan_mode_default": false,
+  "pre_tool_hook": "",
+
+  "instructions_file": "AGENTS.md",
+  "max_instructions_bytes": 4096,
+  "max_command_bytes": 4096
 }
