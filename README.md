@@ -29,10 +29,13 @@ paste in a 2,000-line file so the model can change one line. metron makes that i
 | Budget | Default | Enforced by |
 | --- | --- | --- |
 | Lines per file read | 121 | `view_slice` rejects wider ranges outright |
+| Characters per line | 500 | `view_slice` clips longer lines and marks the cut |
+| Files listed | 60 | `list_files` truncates and says so |
 | Search matches, total | 10 | `search_text` truncates and says so |
 | Search matches per file | 2 | ripgrep's `--max-count` |
 | Model round-trips per turn | 10 | the agent loop returns `max turns exceeded` |
 | Slice retained after a turn | none | history compaction replaces it with a placeholder |
+| Messages carried between turns | 60 | oldest exchanges are dropped once a turn completes |
 
 Every one of those is configurable — see [Configuration](#configuration).
 
@@ -75,10 +78,32 @@ cd ~/code/my-project
 metron
 ```
 
+### One-shot mode
+
+For scripts and CI, `-p` runs a single request and exits. The answer goes to stdout and
+everything else to stderr, so the result is pipeable:
+
+```bash
+metron -p "which files define Greet?" 2>/dev/null
+```
+
+There is nobody to answer the approval prompt in this mode, so `apply_patch` fails closed:
+patches are refused unless you pass `--yes` (or set `auto_approve_patches`). `--version` prints
+the build stamp; `-h` lists the flags.
+
 Type a request at the prompt. Each line is one turn: metron sends it to the model, runs
 whatever tools the model asks for (echoing `[executing: <tool>]` as it goes), and prints the
 final answer. Conversation history persists across turns within a session and is never
 written to disk.
+
+### Flags
+
+| Flag | Effect |
+| --- | --- |
+| `-p`, `--prompt` | run one request non-interactively and exit |
+| `--yes` | apply patches without asking (required by `-p` to edit files) |
+| `--version` | print the version and exit |
+| `-h` | list the flags |
 
 ### Commands
 
@@ -87,15 +112,26 @@ written to disk.
 | `/help` | list the commands |
 | `/config` | print the effective settings and which file they came from |
 | `/reset` | clear the conversation history, keeping the system prompt |
+| `/history` | show how many messages and bytes the session is carrying |
 | `/tags` | rebuild the ctags index — do this after a big refactor |
 | `/exit` | quit (also `exit`, `quit`, `/quit`, or Ctrl-D) |
 
 ### A note on `apply_patch`
 
-metron edits your working tree directly. Patches are dry-run through `git apply --check` first
-and rejected as a whole if they do not apply cleanly, so a bad patch leaves your files
-untouched — but a *good* patch is applied without asking. **Work on a clean branch and commit
-before you start**, so `git diff` shows you exactly what the model did.
+metron edits your working tree, but not behind your back: it prints the model's diff and waits
+for a `y` before touching anything. Anything else — `n`, a bare Return, or EOF — declines, and
+the refusal goes back to the model as text so it explains the change instead of retrying.
+
+Patches are also dry-run through `git apply --check` first and rejected as a whole if they do
+not apply cleanly, so a bad patch leaves your files untouched. Even so, **work on a clean branch
+and commit before you start**, so `git diff` shows you exactly what the model did.
+
+Set `auto_approve_patches` to `true` to skip the prompt.
+
+### Interrupting a reply
+
+A big local model can spend minutes on one answer. Ctrl-C during a reply cancels that turn and
+returns you to the prompt with the session intact; Ctrl-C at an idle prompt quits.
 
 ## Configuration
 
@@ -125,15 +161,20 @@ cp metron.example.json .metron.json
 | --- | --- | --- |
 | `endpoint` | `http://localhost:11434/api/chat` | Ollama chat endpoint, path included |
 | `model` | `qwen2.5-coder:32b` | model name to request |
-| `timeout_seconds` | `180` | HTTP timeout for one model call — see the note below |
+| `timeout_seconds` | `180` | seconds of *silence* before a model call is abandoned |
+| `stream` | `true` | print the reply as it is generated |
 | `temperature` | `0.1` | sampling temperature |
 | `top_p` | `0.95` | nucleus sampling cutoff |
 | `num_ctx` | `16384` | context window requested from Ollama |
 | `max_turns` | `10` | model round-trips allowed in one user turn |
 | `compact_threshold_bytes` | `400` | tool output above this size is purged after the turn |
+| `max_history_messages` | `60` | messages kept after a turn, excluding the system prompt |
 | `max_slice_lines` | `120` | widest span `view_slice` will read |
+| `max_line_chars` | `500` | longest single line `view_slice` will emit |
+| `auto_approve_patches` | `false` | apply patches without showing the diff and asking |
 | `search_max_matches` | `10` | total `search_text` results |
 | `search_max_per_file` | `2` | `search_text` results per file |
+| `list_max_entries` | `60` | paths `list_files` will return |
 
 A file that exists but cannot be read or parsed is a startup error, not a silent fallback —
 including unknown keys, so a typo like `"modle"` is reported instead of ignored. Values are
@@ -142,11 +183,15 @@ validated (positive budgets, `top_p` in `(0, 1]`) before the agent starts.
 **The default model is probably not yours.** `qwen2.5-coder:32b` is a placeholder; set `model`
 to something you have actually pulled and that reports the `tools` capability.
 
-**Raise `timeout_seconds` for large local models.** Streaming is off, so the HTTP timeout has
-to cover the *entire* generation, not just the first byte. A big model on a busy laptop can
-spend several minutes on one reply and trip the 180s default mid-thought — this is the most
-likely cause of `context deadline exceeded (Client.Timeout exceeded while awaiting headers)`.
-The live tests use 900s for exactly this reason.
+**`timeout_seconds` bounds silence, not total generation time.** It is an idle watchdog: it
+resets every time a chunk arrives, so a reply that takes ten minutes but keeps producing tokens
+is never cut off, while a genuinely hung server still gives up after 180 seconds. Raise it only
+if your hardware needs longer than that to produce the *first* token.
+
+Setting `stream` to `false` restores the old behaviour — one blocking request, no output until
+the reply is complete. The watchdog then covers the whole call, which is where the old
+`context deadline exceeded` failure came from, so raise `timeout_seconds` if you turn streaming
+off on slow hardware.
 
 ### Environment
 
@@ -167,8 +212,17 @@ layer won.
 
 ## The tools
 
-Four tools, each a standalone function in `internal/tools` with no shared state. This is the
+Five tools, each a standalone function in `internal/tools` with no shared state. This is the
 complete surface the model has for touching your code.
+
+### `list_files(pattern)`
+
+Answers "what is here?" — the question the other four tools all assume you already know the
+answer to. Runs `rg --files`, optionally narrowed by a glob (`internal/**/*.go`), capped at
+`list_max_entries` with a `[truncated to N entries; narrow with a glob]` line.
+
+Because it goes through ripgrep it honours `.gitignore` for free, so build output and vendored
+trees never reach the model's context.
 
 ### `find_symbol(symbol)`
 
@@ -213,18 +267,18 @@ main.go              REPL and commands. No conversation state lives here.
 internal/config      Settings: defaults, JSON file, environment, validation.
 internal/ollama      HTTP client for Ollama's /api/chat, plus the shared wire types.
 internal/agent       The agent loop, the system prompt, tool schemas, compaction.
-internal/tools       The four tools plus the startup dependency check.
+internal/tools       The five tools plus the startup dependency check.
 ```
 
 Seams are interfaces, so each layer can be driven in isolation: `agent.New` takes a `Chatter`
-(the one-method subset of `*ollama.Client`), and `run` takes a `stepper` plus an
-`io.Reader`/`io.Writer` instead of touching stdin directly.
+(the one-method subset of `*ollama.Client`), and `run` takes a `stepper` plus a scanner and an
+`io.Writer` instead of touching stdin directly.
 
 ### The loop
 
 `Agent.Step` appends the user message, then iterates at most `max_turns` times:
 
-1. Call the model with the full history and all four tool schemas.
+1. Call the model with the full history and all five tool schemas.
 2. Append the reply to history.
 3. If the reply has no tool calls, compact the history and return the reply — done.
 4. Otherwise run every tool call in the reply, appending each result as a `role: "tool"`
@@ -233,6 +287,19 @@ Seams are interfaces, so each layer can be driven in isolation: `agent.New` take
 Exceeding the limit returns a `max turns exceeded` error. Unknown tool names and tool failures
 are appended to history *as strings* rather than raised as Go errors: the model sees its own
 mistakes and gets a chance to recover.
+
+### Measuring the budget
+
+After every reply metron prints what the turn cost:
+
+```
+[1240 prompt / 89 generated tokens · 3 tool calls]
+```
+
+The counts come from Ollama's own `prompt_eval_count` and `eval_count`. Once the prompt passes
+80% of `num_ctx` a warning follows it, since that is the point at which the next turn starts
+losing room rather than merely using it. `/history` shows what the session is carrying and
+`/reset` clears it.
 
 ### Context compaction
 
@@ -257,7 +324,7 @@ codebase. Three edits:
 2. Add its JSON schema to the package-level `toolDefs` slice in `internal/agent/loop.go`.
 3. Add a `case` for it in `Agent.dispatch`.
 
-Then extend `TestDispatchRoutesToolsAndReportsErrors` and `TestStepAdvertisesAllFourTools`.
+Then extend `TestDispatchRoutesToolsAndReportsErrors` and `TestStepAdvertisesEveryTool`.
 
 ## Testing
 
@@ -352,10 +419,6 @@ and not to retry, it tried once, fell back to `view_slice`, and finished the job
 - No fallback if `rg` or a compatible `ctags` is missing; the affected tool reports the error
   to the model and the startup check warns you.
 - `.tags` is built once and never invalidated automatically — use `/tags`.
-- History is unbounded apart from slice compaction; a very long session will still grow.
-  `/reset` clears it.
-- No streaming, so there is no output until the model finishes a reply — and the HTTP timeout
-  has to cover the whole generation.
-- No approval prompt before a patch is applied.
+- Trimming history drops the oldest exchanges silently; the model is not told that earlier
+  context is gone.
 - Conversation history is lost when you exit.
-- Ctrl-C kills the process rather than cancelling an in-flight model call.

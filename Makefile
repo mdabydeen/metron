@@ -8,8 +8,10 @@ DOCKER_IMAGE=metron-test
 
 # ---------------------------------------------------------------- build ----
 
+VERSION?=$(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+
 build:
-	go build -ldflags="-s -w" -o bin/$(BINARY_NAME) main.go
+	go build -ldflags="-s -w -X main.version=$(VERSION)" -o bin/$(BINARY_NAME) main.go
 
 install: build
 	sudo cp bin/$(BINARY_NAME) $(INSTALL_PATH)/$(BINARY_NAME)

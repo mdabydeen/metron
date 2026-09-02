@@ -1,6 +1,7 @@
 package ollama
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -17,8 +18,16 @@ func TestNewClientDefaults(t *testing.T) {
 	if c.endpoint != "http://example.invalid/api/chat" || c.model != "test-model" {
 		t.Fatalf("NewClient() = %+v, want the endpoint and model stored", c)
 	}
-	if c.http == nil || c.http.Timeout != 180*time.Second {
-		t.Fatalf("NewClient() http client = %+v, want a 180s timeout", c.http)
+	if c.http == nil {
+		t.Fatal("NewClient() http client = nil")
+	}
+	// The timeout lives on the idle watchdog, not the client: a client-level
+	// deadline would cap the whole generation rather than the silence.
+	if c.http.Timeout != 0 {
+		t.Fatalf("NewClient() http client timeout = %v, want none", c.http.Timeout)
+	}
+	if c.opts.Timeout != 180*time.Second {
+		t.Fatalf("NewClient() idle timeout = %v, want 180s", c.opts.Timeout)
 	}
 }
 
@@ -195,8 +204,8 @@ func TestChatReportsInvalidEndpoint(t *testing.T) {
 func TestNewClientFallsBackToTheDefaultTimeout(t *testing.T) {
 	c := NewClient("http://example.invalid", "m", Options{Temperature: 0.2})
 
-	if c.http.Timeout != DefaultOptions().Timeout {
-		t.Fatalf("timeout = %v, want the default %v", c.http.Timeout, DefaultOptions().Timeout)
+	if c.opts.Timeout != DefaultOptions().Timeout {
+		t.Fatalf("timeout = %v, want the default %v", c.opts.Timeout, DefaultOptions().Timeout)
 	}
 }
 
@@ -217,5 +226,175 @@ func TestChatSendsConfiguredSamplingOptions(t *testing.T) {
 		if v, _ := got.Options[key].(float64); v != want {
 			t.Errorf("options[%q] = %v, want %v", key, got.Options[key], want)
 		}
+	}
+}
+
+func TestChatReportsTokenUsage(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"message":{"role":"assistant","content":"hi"},` +
+			`"prompt_eval_count":1240,"eval_count":89,"done":true}`))
+	}))
+	defer srv.Close()
+
+	got, err := NewClient(srv.URL, "m", DefaultOptions()).Chat(context.Background(), nil, nil)
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if got.Usage.PromptTokens != 1240 || got.Usage.GenTokens != 89 {
+		t.Fatalf("Usage = %+v, want the counts Ollama reported", got.Usage)
+	}
+	if got.Content != "hi" {
+		t.Fatalf("Content = %q, want the message still carried", got.Content)
+	}
+}
+
+func TestChatReportsZeroUsageWhenTheServerOmitsCounts(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"message":{"role":"assistant","content":"hi"},"done":true}`))
+	}))
+	defer srv.Close()
+
+	got, err := NewClient(srv.URL, "m", DefaultOptions()).Chat(context.Background(), nil, nil)
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if (got.Usage != Usage{}) {
+		t.Fatalf("Usage = %+v, want zero when the server reports nothing", got.Usage)
+	}
+}
+
+func TestUsageAddAccumulates(t *testing.T) {
+	u := Usage{PromptTokens: 10, GenTokens: 2}
+	u.Add(Usage{PromptTokens: 5, GenTokens: 3})
+
+	if (u != Usage{PromptTokens: 15, GenTokens: 5}) {
+		t.Fatalf("Usage = %+v, want the counts summed", u)
+	}
+}
+
+// streamOpts requests streaming with content echoed to sink.
+func streamOpts(sink io.Writer) Options {
+	o := DefaultOptions()
+	o.Stream = true
+	o.Sink = sink
+	return o
+}
+
+func TestChatAssemblesAStreamedReply(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		if !req.Stream {
+			t.Error("request Stream = false, want streaming requested")
+		}
+		for _, chunk := range []string{
+			`{"message":{"role":"assistant","content":"Greet "},"done":false}`,
+			`{"message":{"role":"assistant","content":"returns "},"done":false}`,
+			`{"message":{"role":"assistant","content":"hola."},"done":true,` +
+				`"prompt_eval_count":12,"eval_count":5}`,
+		} {
+			_, _ = w.Write([]byte(chunk + "\n"))
+		}
+	}))
+	defer srv.Close()
+
+	var sink bytes.Buffer
+	got, err := NewClient(srv.URL, "m", streamOpts(&sink)).Chat(context.Background(), nil, nil)
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if got.Content != "Greet returns hola." {
+		t.Fatalf("Content = %q, want the chunks joined", got.Content)
+	}
+	if got.Role != "assistant" {
+		t.Fatalf("Role = %q, want assistant", got.Role)
+	}
+	if sink.String() != "Greet returns hola." {
+		t.Fatalf("sink = %q, want the content echoed as it arrived", sink.String())
+	}
+	if got.Usage.PromptTokens != 12 || got.Usage.GenTokens != 5 {
+		t.Fatalf("Usage = %+v, want the counts from the final chunk", got.Usage)
+	}
+}
+
+func TestChatCollectsToolCallsFromAStream(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(
+			`{"message":{"role":"assistant","tool_calls":[{"function":{"name":"view_slice",` +
+				`"arguments":{"path":"a.go"}}}]},"done":true}` + "\n"))
+	}))
+	defer srv.Close()
+
+	got, err := NewClient(srv.URL, "m", streamOpts(nil)).Chat(context.Background(), nil, nil)
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if len(got.ToolCalls) != 1 || got.ToolCalls[0].Function.Name != "view_slice" {
+		t.Fatalf("ToolCalls = %+v, want the streamed call assembled", got.ToolCalls)
+	}
+}
+
+func TestChatStreamsWithoutASink(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"message":{"role":"assistant","content":"hi"},"done":true}` + "\n"))
+	}))
+	defer srv.Close()
+
+	opts := DefaultOptions()
+	opts.Stream = true
+	got, err := NewClient(srv.URL, "m", opts).Chat(context.Background(), nil, nil)
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if got.Content != "hi" {
+		t.Fatalf("Content = %q, want the reply assembled with no sink attached", got.Content)
+	}
+}
+
+func TestChatEndsAStreamThatStopsWithoutDone(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// A server that closes the body mid-stream: EOF ends the reply rather
+		// than hanging or erroring.
+		_, _ = w.Write([]byte(`{"message":{"role":"assistant","content":"partial"},"done":false}` + "\n"))
+	}))
+	defer srv.Close()
+
+	got, err := NewClient(srv.URL, "m", streamOpts(nil)).Chat(context.Background(), nil, nil)
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if got.Content != "partial" {
+		t.Fatalf("Content = %q, want what arrived before EOF", got.Content)
+	}
+}
+
+func TestChatReportsAMalformedStream(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("not json\n"))
+	}))
+	defer srv.Close()
+
+	_, err := NewClient(srv.URL, "m", streamOpts(nil)).Chat(context.Background(), nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "decode stream") {
+		t.Fatalf("Chat() error = %v, want the stream decode failure", err)
+	}
+}
+
+func TestChatIdleTimeoutCancelsAStalledRequest(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release // never answers within the timeout
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	opts := DefaultOptions()
+	opts.Timeout = 50 * time.Millisecond
+	_, err := NewClient(srv.URL, "m", opts).Chat(context.Background(), nil, nil)
+
+	if err == nil {
+		t.Fatal("Chat() = nil error, want the idle watchdog to give up")
 	}
 }

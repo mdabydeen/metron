@@ -1,0 +1,33 @@
+# Test image for the integration tier: metron's tools shell out to ripgrep,
+# Universal Ctags and git, and shims can only prove we call them correctly --
+# not that they behave the way we assume. See `make docker-test`.
+FROM golang:1.26-alpine
+
+# build-base is needed by the race detector; alpine's `ctags` package is
+# Universal Ctags, which BSD ctags (shipped on macOS) is not.
+RUN apk add --no-cache ripgrep ctags git build-base
+
+# Fail the build loudly if a future base image swaps the ctags implementation,
+# rather than silently skipping every find_symbol test.
+RUN ctags --version | grep -q "Universal Ctags" \
+    && rg --version >/dev/null \
+    && git --version >/dev/null
+
+# The suite runs unprivileged on purpose: several cases assert on permission
+# failures, which root would bypass -- turning real coverage into a silent pass.
+RUN adduser -D -u 1000 tester
+ENV HOME=/home/tester GOCACHE=/home/tester/.cache/go-build GOFLAGS=-buildvcs=false
+
+WORKDIR /src
+COPY . .
+RUN chown -R tester:tester /src /home/tester
+
+USER tester
+
+# git apply needs an identity and a repo it is willing to touch; the tools
+# tests create throwaway repositories under t.TempDir().
+RUN git config --global user.email "tester@example.com" \
+    && git config --global user.name "metron tests" \
+    && git config --global --add safe.directory '*'
+
+CMD ["go", "test", "-tags=integration", "./..."]

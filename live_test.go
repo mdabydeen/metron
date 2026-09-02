@@ -77,17 +77,19 @@ type countingChatter struct {
 	inner     agent.Chatter
 	calls     int
 	toolNames []string
+	usage     ollama.Usage
 }
 
-func (c *countingChatter) Chat(ctx context.Context, msgs []ollama.Message, tls []ollama.Tool) (*ollama.Message, error) {
+func (c *countingChatter) Chat(ctx context.Context, msgs []ollama.Message, tls []ollama.Tool) (*ollama.Reply, error) {
 	c.calls++
-	msg, err := c.inner.Chat(ctx, msgs, tls)
+	reply, err := c.inner.Chat(ctx, msgs, tls)
 	if err == nil {
-		for _, tc := range msg.ToolCalls {
+		for _, tc := range reply.ToolCalls {
 			c.toolNames = append(c.toolNames, tc.Function.Name)
 		}
+		c.usage.Add(reply.Usage)
 	}
-	return msg, err
+	return reply, err
 }
 
 func liveSetup(t *testing.T) (*countingChatter, *agent.Agent, config.Config) {
@@ -100,9 +102,8 @@ func liveSetup(t *testing.T) (*countingChatter, *agent.Agent, config.Config) {
 	if v := os.Getenv("OLLAMA_HOST"); v != "" {
 		cfg.Endpoint = v
 	}
-	// Streaming is off, so the HTTP timeout has to cover the whole generation.
-	// The 180s default is comfortable for a hosted model and tight for a large
-	// local one, which is exactly why timeout_seconds is configurable.
+	// timeout_seconds is an idle watchdog, but a big local model can still be
+	// slow to produce its *first* token on loaded hardware.
 	cfg.TimeoutSeconds = 900
 	if v := os.Getenv("METRON_TEST_TIMEOUT_SECONDS"); v != "" {
 		n, err := strconv.Atoi(v)
@@ -119,14 +120,18 @@ func liveSetup(t *testing.T) (*countingChatter, *agent.Agent, config.Config) {
 		TopP:        cfg.TopP,
 		NumCtx:      cfg.NumCtx,
 		Timeout:     time.Duration(cfg.TimeoutSeconds) * time.Second,
+		Stream:      cfg.Stream,
 	})
 	counting := &countingChatter{inner: client}
 	return counting, agent.New(counting, agent.Options{
-		MaxTurns:         cfg.MaxTurns,
-		CompactThreshold: cfg.CompactThreshold,
-		MaxSliceLines:    cfg.MaxSliceLines,
-		SearchMaxMatches: cfg.SearchMaxMatches,
-		SearchMaxPerFile: cfg.SearchMaxPerFile,
+		MaxTurns:           cfg.MaxTurns,
+		CompactThreshold:   cfg.CompactThreshold,
+		MaxHistoryMessages: cfg.MaxHistoryMessages,
+		MaxSliceLines:      cfg.MaxSliceLines,
+		MaxLineChars:       cfg.MaxLineChars,
+		SearchMaxMatches:   cfg.SearchMaxMatches,
+		SearchMaxPerFile:   cfg.SearchMaxPerFile,
+		ListMaxEntries:     cfg.ListMaxEntries,
 	}), cfg
 }
 
