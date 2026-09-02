@@ -224,9 +224,10 @@ func (a *Agent) Step(ctx context.Context, userPrompt string) (string, error) {
 		for _, call := range resp.ToolCalls {
 			out := a.dispatch(call)
 			a.messages = append(a.messages, ollama.Message{
-				Role:     "tool",
-				ToolName: call.Function.Name,
-				Content:  out,
+				Role:       "tool",
+				ToolName:   call.Function.Name,
+				ToolCallID: call.ID,
+				Content:    out,
 			})
 		}
 	}

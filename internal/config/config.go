@@ -20,6 +20,11 @@ type Config struct {
 	// Connection
 	Endpoint string `json:"endpoint"`
 	Model    string `json:"model"`
+	// Provider selects the wire format: "ollama" speaks Ollama's /api/chat,
+	// "openai" speaks the OpenAI chat-completions format used by llama.cpp,
+	// vLLM, LM Studio and similar local servers. Both are local-only --
+	// Endpoint still has to point at a server on your machine or network.
+	Provider string `json:"provider"`
 	// TimeoutSeconds bounds silence, not total generation time: a streamed
 	// reply that keeps arriving is never cut off, however long it takes.
 	TimeoutSeconds int  `json:"timeout_seconds"`
@@ -59,6 +64,7 @@ func Defaults() Config {
 	return Config{
 		Endpoint:             "http://localhost:11434/api/chat",
 		Model:                "qwen2.5-coder:32b",
+		Provider:             "ollama",
 		TimeoutSeconds:       180,
 		Stream:               true,
 		Temperature:          0.1,
@@ -83,6 +89,17 @@ func Defaults() Config {
 
 // ProjectFile is the config file metron looks for in the working directory.
 const ProjectFile = ".metron.json"
+
+// IsProjectFile reports whether path is the project-local config file found
+// by searching the working directory, as opposed to the user-level config or
+// an explicit $METRON_CONFIG override. A repository's own .metron.json is
+// not something the operator necessarily wrote or reviewed -- cloning an
+// untrusted repo and running metron in it loads whatever that file contains
+// with no prompt -- so callers use this to require extra confirmation before
+// honoring security-sensitive keys (pre_tool_hook) sourced from it.
+func IsProjectFile(path string) bool {
+	return path == ProjectFile
+}
 
 // Search returns the config file paths metron consults, highest priority
 // first. An explicit path (from METRON_CONFIG) short-circuits the search.
@@ -179,6 +196,9 @@ func (c Config) Validate() error {
 	}
 	if strings.TrimSpace(c.Model) == "" {
 		problems = append(problems, "model must not be empty")
+	}
+	if c.Provider != "ollama" && c.Provider != "openai" {
+		problems = append(problems, fmt.Sprintf(`provider must be "ollama" or "openai" (got %q)`, c.Provider))
 	}
 	for _, check := range []struct {
 		name string

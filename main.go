@@ -17,6 +17,7 @@ import (
 	"metron/internal/agent"
 	"metron/internal/config"
 	"metron/internal/ollama"
+	"metron/internal/openai"
 	"metron/internal/session"
 	"metron/internal/tools"
 )
@@ -124,22 +125,10 @@ func runMain(args []string, in io.Reader, out, errOut io.Writer) int {
 		return 1
 	}
 
-	clientOpts := ollama.Options{
-		Temperature: cfg.Temperature,
-		TopP:        cfg.TopP,
-		NumCtx:      cfg.NumCtx,
-		Timeout:     time.Duration(cfg.TimeoutSeconds) * time.Second,
-		Stream:      cfg.Stream,
-	}
 	// One-shot mode wants exactly one clean answer on stdout, so it never
 	// streams; there is no reader watching it arrive.
 	streamed := cfg.Stream && f.prompt == ""
-	if streamed {
-		clientOpts.Sink = out
-	} else {
-		clientOpts.Stream = false
-	}
-	client := ollama.NewClient(cfg.Endpoint, cfg.Model, clientOpts)
+	client := newClient(cfg, streamed, out)
 
 	// One scanner serves both the REPL and the patch prompt. Two would race for
 	// the same stdin and the second would lose whatever the first had buffered.
@@ -159,7 +148,7 @@ func runMain(args []string, in io.Reader, out, errOut io.Writer) int {
 		MaxUndoStack:       cfg.MaxUndoStack,
 		Instructions:       instructions,
 		Progress:           out,
-		PreToolHook:        preToolHook(cfg.PreToolHook),
+		PreToolHook:        preToolHook(trustedPreToolHook(cfg.PreToolHook, path, errOut)),
 	}
 	autoApprove := cfg.AutoApprovePatches || f.yes
 	switch {
@@ -190,6 +179,56 @@ func runMain(args []string, in io.Reader, out, errOut io.Writer) int {
 
 	run(context.Background(), scanner, out, cfg, path, bot, streamed, instructions, commands)
 	return 0
+}
+
+// newClient builds the Chatter for the configured provider. Both clients
+// produce the same ollama.Reply/Message/Usage shape -- agent and the rest of
+// main work against that shape only, never against a provider's wire format
+// -- so this switch is the only place provider selection is visible.
+func newClient(cfg config.Config, streamed bool, out io.Writer) agent.Chatter {
+	timeout := time.Duration(cfg.TimeoutSeconds) * time.Second
+	switch cfg.Provider {
+	case "openai":
+		opts := openai.Options{Temperature: cfg.Temperature, TopP: cfg.TopP, Timeout: timeout, Stream: cfg.Stream}
+		if streamed {
+			opts.Sink = out
+		} else {
+			opts.Stream = false
+		}
+		return openai.NewClient(cfg.Endpoint, cfg.Model, opts)
+	default: // "ollama", and Config.Validate rejects anything else
+		opts := ollama.Options{
+			Temperature: cfg.Temperature, TopP: cfg.TopP, NumCtx: cfg.NumCtx,
+			Timeout: timeout, Stream: cfg.Stream,
+		}
+		if streamed {
+			opts.Sink = out
+		} else {
+			opts.Stream = false
+		}
+		return ollama.NewClient(cfg.Endpoint, cfg.Model, opts)
+	}
+}
+
+// trustProjectHookEnv opts in to honoring pre_tool_hook when it came from the
+// project-local .metron.json -- a file that may have arrived inside a cloned
+// repository, not something the operator necessarily wrote themselves.
+const trustProjectHookEnv = "METRON_TRUST_PROJECT_HOOK"
+
+// trustedPreToolHook returns cmdline unchanged, unless it was sourced from the
+// project-local config file and the operator has not opted in to trusting
+// that file's hooks -- in which case it is refused with a warning rather than
+// silently run. Without this gate, a repository's own .metron.json could run
+// arbitrary shell commands with the operator's privileges the moment metron
+// is started in it, before any approval prompt exists to stop it.
+func trustedPreToolHook(cmdline, path string, errOut io.Writer) string {
+	if cmdline == "" || !config.IsProjectFile(path) || os.Getenv(trustProjectHookEnv) != "" {
+		return cmdline
+	}
+	fmt.Fprintf(errOut, "\033[33mwarning: ignoring pre_tool_hook from %s -- it came from the project "+
+		"directory and may not be trustworthy (e.g. a cloned repository). Move it to your user config "+
+		"instead, or set %s=1 if you trust this project.\033[0m\n", path, trustProjectHookEnv)
+	return ""
 }
 
 // preToolHook wraps the configured shell command as an agent.Options
