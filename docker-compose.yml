@@ -1,0 +1,24 @@
+# Containerised test runs. See `make docker-test`.
+services:
+  # Full suite, including the integration tests that need real rg/ctags/git.
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    command: go test -tags=integration ./...
+
+  # Same, with the race detector.
+  race:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    command: go test -tags=integration -race -count=1 ./...
+
+  # Coverage, including the integration tests.
+  cover:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    command: >
+      sh -c "go test -tags=integration -covermode=count -coverprofile=/tmp/coverage.out ./... &&
+             go tool cover -func=/tmp/coverage.out | tail -1"

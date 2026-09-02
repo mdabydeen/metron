@@ -1,0 +1,16 @@
+{
+  "endpoint": "http://localhost:11434/api/chat",
+  "model": "qwen2.5-coder:32b",
+  "timeout_seconds": 180,
+
+  "temperature": 0.1,
+  "top_p": 0.95,
+  "num_ctx": 16384,
+
+  "max_turns": 10,
+  "compact_threshold_bytes": 400,
+
+  "max_slice_lines": 120,
+  "search_max_matches": 10,
+  "search_max_per_file": 2
+}

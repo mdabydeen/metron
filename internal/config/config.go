@@ -1,0 +1,157 @@
+// Package config loads metron's settings from a JSON file, with defaults and
+// environment overrides. Resolution order, lowest priority first:
+//
+//	built-in defaults  <  config file  <  environment variables
+package config
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+// Config is the full set of tunable settings. Every field maps to a value that
+// was previously hard-coded, so a stock config file reproduces the old
+// behaviour exactly.
+type Config struct {
+	// Connection
+	Endpoint       string `json:"endpoint"`
+	Model          string `json:"model"`
+	TimeoutSeconds int    `json:"timeout_seconds"`
+
+	// Sampling
+	Temperature float64 `json:"temperature"`
+	TopP        float64 `json:"top_p"`
+	NumCtx      int     `json:"num_ctx"`
+
+	// Agent loop
+	MaxTurns         int `json:"max_turns"`
+	CompactThreshold int `json:"compact_threshold_bytes"`
+
+	// Tool budgets
+	MaxSliceLines    int `json:"max_slice_lines"`
+	SearchMaxMatches int `json:"search_max_matches"`
+	SearchMaxPerFile int `json:"search_max_per_file"`
+}
+
+// Defaults returns the built-in configuration.
+func Defaults() Config {
+	return Config{
+		Endpoint:         "http://localhost:11434/api/chat",
+		Model:            "qwen2.5-coder:32b",
+		TimeoutSeconds:   180,
+		Temperature:      0.1,
+		TopP:             0.95,
+		NumCtx:           16384,
+		MaxTurns:         10,
+		CompactThreshold: 400,
+		MaxSliceLines:    120,
+		SearchMaxMatches: 10,
+		SearchMaxPerFile: 2,
+	}
+}
+
+// ProjectFile is the config file metron looks for in the working directory.
+const ProjectFile = ".metron.json"
+
+// Search returns the config file paths metron consults, highest priority
+// first. An explicit path (from METRON_CONFIG) short-circuits the search.
+func Search() []string {
+	if explicit := os.Getenv("METRON_CONFIG"); explicit != "" {
+		return []string{explicit}
+	}
+	paths := []string{ProjectFile}
+	dir := os.Getenv("XDG_CONFIG_HOME")
+	if dir == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			dir = filepath.Join(home, ".config")
+		}
+	}
+	if dir != "" {
+		paths = append(paths, filepath.Join(dir, "metron", "config.json"))
+	}
+	return paths
+}
+
+// Load resolves the configuration: defaults, overlaid with the first config
+// file found, overlaid with the environment. The returned path is the file
+// that was used, or "" if none was found.
+//
+// A file that exists but cannot be read or parsed is an error rather than a
+// silent fallback -- a typo in a config file should not quietly change how the
+// agent behaves.
+func Load() (Config, string, error) {
+	cfg := Defaults()
+
+	var used string
+	for _, path := range Search() {
+		data, err := os.ReadFile(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return cfg, path, fmt.Errorf("read config %s: %w", path, err)
+		}
+		dec := json.NewDecoder(strings.NewReader(string(data)))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&cfg); err != nil {
+			return cfg, path, fmt.Errorf("parse config %s: %w", path, err)
+		}
+		used = path
+		break
+	}
+
+	// The environment wins, so a one-off override needs no file edit.
+	if v := os.Getenv("OLLAMA_HOST"); v != "" {
+		cfg.Endpoint = v
+	}
+	if v := os.Getenv("OLLAMA_MODEL"); v != "" {
+		cfg.Model = v
+	}
+
+	if err := cfg.Validate(); err != nil {
+		return cfg, used, err
+	}
+	return cfg, used, nil
+}
+
+// Validate rejects settings that would make the agent misbehave rather than
+// merely perform differently.
+func (c Config) Validate() error {
+	var problems []string
+	if strings.TrimSpace(c.Endpoint) == "" {
+		problems = append(problems, "endpoint must not be empty")
+	}
+	if strings.TrimSpace(c.Model) == "" {
+		problems = append(problems, "model must not be empty")
+	}
+	for _, check := range []struct {
+		name string
+		val  int
+	}{
+		{"timeout_seconds", c.TimeoutSeconds},
+		{"num_ctx", c.NumCtx},
+		{"max_turns", c.MaxTurns},
+		{"compact_threshold_bytes", c.CompactThreshold},
+		{"max_slice_lines", c.MaxSliceLines},
+		{"search_max_matches", c.SearchMaxMatches},
+		{"search_max_per_file", c.SearchMaxPerFile},
+	} {
+		if check.val <= 0 {
+			problems = append(problems, fmt.Sprintf("%s must be > 0 (got %d)", check.name, check.val))
+		}
+	}
+	if c.Temperature < 0 {
+		problems = append(problems, fmt.Sprintf("temperature must be >= 0 (got %v)", c.Temperature))
+	}
+	if c.TopP <= 0 || c.TopP > 1 {
+		problems = append(problems, fmt.Sprintf("top_p must be in (0, 1] (got %v)", c.TopP))
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("invalid config: %s", strings.Join(problems, "; "))
+	}
+	return nil
+}
