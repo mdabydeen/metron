@@ -2,6 +2,7 @@
   "endpoint": "http://localhost:11434/api/chat",
   "model": "qwen2.5-coder:32b",
   "timeout_seconds": 180,
+  "stream": true,
 
   "temperature": 0.1,
   "top_p": 0.95,
@@ -9,8 +10,13 @@
 
   "max_turns": 10,
   "compact_threshold_bytes": 400,
+  "max_history_messages": 60,
 
   "max_slice_lines": 120,
+  "max_line_chars": 500,
   "search_max_matches": 10,
-  "search_max_per_file": 2
+  "search_max_per_file": 2,
+  "list_max_entries": 60,
+
+  "auto_approve_patches": false
 }

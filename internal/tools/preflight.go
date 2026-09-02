@@ -38,6 +38,11 @@ func Preflight() []string {
 			warnings = append(warnings, fmt.Sprintf(
 				"ctags on PATH is not Universal Ctags - find_symbol is unavailable (%s)", dep.Hint))
 		}
+		if dep.Binary == "git" && !insideWorkTree() {
+			warnings = append(warnings,
+				"the working directory is not a git repository - apply_patch will fail "+
+					"(run metron from a repo root)")
+		}
 	}
 	return warnings
 }
@@ -51,6 +56,18 @@ func isUniversalCtags() bool {
 		return false
 	}
 	return strings.Contains(string(out), "Universal Ctags")
+}
+
+// insideWorkTree reports whether the working directory is inside a git
+// repository. Having the git binary is not enough: apply_patch shells out to
+// `git apply`, which outside a repository fails with a message the model then
+// wastes turns trying to fix as if it were a bad diff.
+func insideWorkTree() bool {
+	out, err := exec.Command("git", "rev-parse", "--is-inside-work-tree").Output()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(out)) == "true"
 }
 
 // RebuildTags discards any existing ctags index and builds a fresh one. The

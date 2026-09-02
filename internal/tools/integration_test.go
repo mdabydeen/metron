@@ -49,10 +49,36 @@ func TestIntegrationPreflightPassesWithRealBinaries(t *testing.T) {
 	requireBinary(t, "rg")
 	requireBinary(t, "ctags")
 	requireBinary(t, "git")
+	initRepo(t)
 
 	if got := Preflight(); len(got) != 0 {
 		t.Fatalf("Preflight() = %v, want no warnings in the integration image", got)
 	}
+}
+
+func TestIntegrationPreflightDetectsANonRepository(t *testing.T) {
+	requireBinary(t, "rg")
+	requireBinary(t, "ctags")
+	requireBinary(t, "git")
+	workdir(t)
+
+	// Real git, real non-repository: the shim tests cannot prove that
+	// `rev-parse --is-inside-work-tree` actually behaves this way.
+	got := Preflight()
+	if len(got) != 1 || !strings.Contains(got[0], "not a git repository") {
+		t.Fatalf("Preflight() = %v, want the not-a-repository warning", got)
+	}
+}
+
+// initRepo makes the test's working directory a real git repository, which is
+// what apply_patch needs and what Preflight now checks for.
+func initRepo(t *testing.T) string {
+	t.Helper()
+	dir := workdir(t)
+	if out, err := exec.Command("git", "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	return dir
 }
 
 func TestIntegrationFindSymbolWithRealCtags(t *testing.T) {
@@ -177,5 +203,67 @@ func TestIntegrationSearchTextInvalidRegex(t *testing.T) {
 
 	if _, err := SearchText("(unclosed", 10, 2); err == nil {
 		t.Fatal("SearchText() = nil error, want ripgrep to reject the pattern")
+	}
+}
+
+func TestIntegrationListFilesWithRealRipgrep(t *testing.T) {
+	requireBinary(t, "rg")
+	sampleProject(t)
+
+	got, err := ListFiles("", 50)
+	if err != nil {
+		t.Fatalf("ListFiles() error = %v", err)
+	}
+	for _, want := range []string{"greeter.go", "other.go"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("ListFiles() = %q, missing %q", got, want)
+		}
+	}
+}
+
+func TestIntegrationListFilesHonoursTheGlob(t *testing.T) {
+	requireBinary(t, "rg")
+	sampleProject(t)
+	writeFile(t, "notes.md", "# notes\n")
+
+	got, err := ListFiles("*.md", 50)
+	if err != nil {
+		t.Fatalf("ListFiles() error = %v", err)
+	}
+	if !strings.Contains(got, "notes.md") || strings.Contains(got, "greeter.go") {
+		t.Fatalf("ListFiles(*.md) = %q, want only the markdown file", got)
+	}
+}
+
+func TestIntegrationListFilesRespectsGitignore(t *testing.T) {
+	requireBinary(t, "rg")
+	requireBinary(t, "git")
+	initRepo(t)
+	writeFile(t, ".gitignore", "ignored.go\n")
+	writeFile(t, "kept.go", "package p\n")
+	writeFile(t, "ignored.go", "package p\n")
+
+	got, err := ListFiles("", 50)
+	if err != nil {
+		t.Fatalf("ListFiles() error = %v", err)
+	}
+	// The point of using `rg --files`: build output stays out of the context
+	// window without metron maintaining an exclusion list of its own.
+	if !strings.Contains(got, "kept.go") || strings.Contains(got, "ignored.go") {
+		t.Fatalf("ListFiles() = %q, want the ignored file excluded", got)
+	}
+}
+
+func TestIntegrationListFilesHonoursTheBudget(t *testing.T) {
+	requireBinary(t, "rg")
+	sampleProject(t)
+	writeFile(t, "third.go", "package sample\n")
+
+	got, err := ListFiles("", 2)
+	if err != nil {
+		t.Fatalf("ListFiles() error = %v", err)
+	}
+	if !strings.Contains(got, "truncated to 2 entries") {
+		t.Fatalf("ListFiles() = %q, want the budget enforced against real ripgrep", got)
 	}
 }

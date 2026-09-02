@@ -18,9 +18,12 @@ import (
 // behaviour exactly.
 type Config struct {
 	// Connection
-	Endpoint       string `json:"endpoint"`
-	Model          string `json:"model"`
-	TimeoutSeconds int    `json:"timeout_seconds"`
+	Endpoint string `json:"endpoint"`
+	Model    string `json:"model"`
+	// TimeoutSeconds bounds silence, not total generation time: a streamed
+	// reply that keeps arriving is never cut off, however long it takes.
+	TimeoutSeconds int  `json:"timeout_seconds"`
+	Stream         bool `json:"stream"`
 
 	// Sampling
 	Temperature float64 `json:"temperature"`
@@ -28,29 +31,40 @@ type Config struct {
 	NumCtx      int     `json:"num_ctx"`
 
 	// Agent loop
-	MaxTurns         int `json:"max_turns"`
-	CompactThreshold int `json:"compact_threshold_bytes"`
+	MaxTurns           int `json:"max_turns"`
+	CompactThreshold   int `json:"compact_threshold_bytes"`
+	MaxHistoryMessages int `json:"max_history_messages"`
 
 	// Tool budgets
 	MaxSliceLines    int `json:"max_slice_lines"`
+	MaxLineChars     int `json:"max_line_chars"`
 	SearchMaxMatches int `json:"search_max_matches"`
 	SearchMaxPerFile int `json:"search_max_per_file"`
+	ListMaxEntries   int `json:"list_max_entries"`
+
+	// Safety
+	AutoApprovePatches bool `json:"auto_approve_patches"`
 }
 
 // Defaults returns the built-in configuration.
 func Defaults() Config {
 	return Config{
-		Endpoint:         "http://localhost:11434/api/chat",
-		Model:            "qwen2.5-coder:32b",
-		TimeoutSeconds:   180,
-		Temperature:      0.1,
-		TopP:             0.95,
-		NumCtx:           16384,
-		MaxTurns:         10,
-		CompactThreshold: 400,
-		MaxSliceLines:    120,
-		SearchMaxMatches: 10,
-		SearchMaxPerFile: 2,
+		Endpoint:           "http://localhost:11434/api/chat",
+		Model:              "qwen2.5-coder:32b",
+		TimeoutSeconds:     180,
+		Stream:             true,
+		Temperature:        0.1,
+		TopP:               0.95,
+		NumCtx:             16384,
+		MaxTurns:           10,
+		CompactThreshold:   400,
+		MaxHistoryMessages: 60,
+		MaxSliceLines:      120,
+		MaxLineChars:       500,
+		SearchMaxMatches:   10,
+		SearchMaxPerFile:   2,
+		ListMaxEntries:     60,
+		AutoApprovePatches: false,
 	}
 }
 
@@ -136,9 +150,12 @@ func (c Config) Validate() error {
 		{"num_ctx", c.NumCtx},
 		{"max_turns", c.MaxTurns},
 		{"compact_threshold_bytes", c.CompactThreshold},
+		{"max_history_messages", c.MaxHistoryMessages},
 		{"max_slice_lines", c.MaxSliceLines},
+		{"max_line_chars", c.MaxLineChars},
 		{"search_max_matches", c.SearchMaxMatches},
 		{"search_max_per_file", c.SearchMaxPerFile},
+		{"list_max_entries", c.ListMaxEntries},
 	} {
 		if check.val <= 0 {
 			problems = append(problems, fmt.Sprintf("%s must be > 0 (got %d)", check.name, check.val))

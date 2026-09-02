@@ -1,11 +1,13 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -16,13 +18,14 @@ import (
 // history it was handed on each call.
 type fakeChatter struct {
 	replies []ollama.Message
+	usage   ollama.Usage
 	err     error
 	calls   int
 	seen    [][]ollama.Message
 	tools   []ollama.Tool
 }
 
-func (f *fakeChatter) Chat(ctx context.Context, messages []ollama.Message, tools []ollama.Tool) (*ollama.Message, error) {
+func (f *fakeChatter) Chat(ctx context.Context, messages []ollama.Message, tools []ollama.Tool) (*ollama.Reply, error) {
 	f.calls++
 	f.seen = append(f.seen, append([]ollama.Message(nil), messages...))
 	f.tools = tools
@@ -30,13 +33,13 @@ func (f *fakeChatter) Chat(ctx context.Context, messages []ollama.Message, tools
 		return nil, f.err
 	}
 	if len(f.replies) == 0 {
-		return &ollama.Message{Role: "assistant", Content: "done"}, nil
+		return &ollama.Reply{Message: ollama.Message{Role: "assistant", Content: "done"}, Usage: f.usage}, nil
 	}
 	next := f.replies[0]
 	if len(f.replies) > 1 {
 		f.replies = f.replies[1:]
 	}
-	return &next, nil
+	return &ollama.Reply{Message: next, Usage: f.usage}, nil
 }
 
 func toolCall(name string, args map[string]any) ollama.Message {
@@ -62,7 +65,7 @@ func TestNewSeedsSystemPrompt(t *testing.T) {
 	if len(a.messages) != 1 || a.messages[0].Role != "system" {
 		t.Fatalf("New() history = %+v, want a single system message", a.messages)
 	}
-	for _, want := range []string{"find_symbol", "search_text", "view_slice", "apply_patch"} {
+	for _, want := range []string{"list_files", "find_symbol", "search_text", "view_slice", "apply_patch"} {
 		if !strings.Contains(a.messages[0].Content, want) {
 			t.Errorf("system prompt missing mention of %q", want)
 		}
@@ -90,14 +93,14 @@ func TestStepReturnsAnswerWithoutToolCalls(t *testing.T) {
 	}
 }
 
-func TestStepAdvertisesAllFourTools(t *testing.T) {
+func TestStepAdvertisesEveryTool(t *testing.T) {
 	fake := &fakeChatter{}
 	if _, err := New(fake, DefaultOptions()).Step(context.Background(), "hi"); err != nil {
 		t.Fatal(err)
 	}
 
-	if len(fake.tools) != 4 {
-		t.Fatalf("advertised %d tools, want 4", len(fake.tools))
+	if len(fake.tools) != 5 {
+		t.Fatalf("advertised %d tools, want 5", len(fake.tools))
 	}
 	seen := map[string]bool{}
 	for _, tool := range fake.tools {
@@ -117,7 +120,7 @@ func TestStepAdvertisesAllFourTools(t *testing.T) {
 			t.Errorf("tool %q has no description", name)
 		}
 	}
-	for _, want := range []string{"find_symbol", "search_text", "view_slice", "apply_patch"} {
+	for _, want := range []string{"list_files", "find_symbol", "search_text", "view_slice", "apply_patch"} {
 		if !seen[want] {
 			t.Errorf("tool %q not advertised", want)
 		}
@@ -241,6 +244,7 @@ func TestDispatchRoutesToolsAndReportsErrors(t *testing.T) {
 		{"view_slice", toolCall("view_slice", map[string]any{"path": "sample.go", "start": 1, "end": 1}), "alpha"},
 		{"view_slice error", toolCall("view_slice", map[string]any{"path": "gone.go", "start": 1, "end": 1}), "Error:"},
 		{"search_text error", toolCall("search_text", map[string]any{"pattern": "x"}), "Error:"},
+		{"list_files error", toolCall("list_files", map[string]any{"pattern": "*.go"}), "Error:"},
 		{"apply_patch error", toolCall("apply_patch", map[string]any{"diff": "junk"}), "Error:"},
 		{"unknown tool", toolCall("mystery", nil), "Unknown tool mystery"},
 	}
@@ -277,6 +281,25 @@ func TestDispatchAppliesPatch(t *testing.T) {
 	b, err := os.ReadFile("target.txt")
 	if err != nil || string(b) != "omega\n" {
 		t.Fatalf("target.txt = %q (err %v), want the patch applied", b, err)
+	}
+}
+
+func TestDispatchListFilesSuccess(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	bin := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "rg"), []byte("#!/bin/sh\necho 'main.go'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	a := New(&fakeChatter{}, DefaultOptions())
+
+	got := a.dispatch(toolCall("list_files", map[string]any{"pattern": "*.go"}).ToolCalls[0])
+	if got != "main.go" {
+		t.Fatalf("dispatch() = %q, want the file listing", got)
 	}
 }
 
@@ -423,6 +446,196 @@ func TestResetClearsHistoryButKeepsTheSystemPrompt(t *testing.T) {
 	}
 }
 
+func TestDispatchWritesProgressToTheConfiguredWriter(t *testing.T) {
+	isolate(t)
+	var progress bytes.Buffer
+	opts := DefaultOptions()
+	opts.Progress = &progress
+	a := New(&fakeChatter{}, opts)
+
+	a.dispatch(toolCall("find_symbol", map[string]any{"symbol": "Greet"}).ToolCalls[0])
+
+	if !strings.Contains(progress.String(), "[executing: find_symbol]") {
+		t.Fatalf("progress = %q, want the tool execution notice", progress.String())
+	}
+}
+
+func TestDispatchDiscardsProgressWhenNoWriterIsSet(t *testing.T) {
+	isolate(t)
+	a := New(&fakeChatter{}, DefaultOptions())
+
+	// The nil-writer path must not panic and must not reach for stdout.
+	if got := a.dispatch(toolCall("find_symbol", map[string]any{"symbol": "X"}).ToolCalls[0]); got == "" {
+		t.Fatal("dispatch() = \"\", want the tool result regardless of progress writer")
+	}
+}
+
+func TestDispatchAsksBeforeApplyingAPatch(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	var seen string
+	opts := DefaultOptions()
+	opts.Approve = func(diff string) bool {
+		seen = diff
+		return false
+	}
+	a := New(&fakeChatter{}, opts)
+
+	got := a.dispatch(toolCall("apply_patch", map[string]any{"diff": "--- a/x\n+++ b/x\n"}).ToolCalls[0])
+
+	if seen != "--- a/x\n+++ b/x\n" {
+		t.Fatalf("approver saw %q, want the model's diff", seen)
+	}
+	if !strings.Contains(got, "rejected by the operator") {
+		t.Fatalf("dispatch() = %q, want a refusal the model can read", got)
+	}
+	if !strings.Contains(got, "Do not retry") {
+		t.Fatalf("dispatch() = %q, want the model told not to retry", got)
+	}
+}
+
+func TestDispatchAppliesWhenTheOperatorApproves(t *testing.T) {
+	t.Chdir(t.TempDir())
+	writeGitRepo(t)
+
+	opts := DefaultOptions()
+	approved := false
+	opts.Approve = func(string) bool {
+		approved = true
+		return true
+	}
+	a := New(&fakeChatter{}, opts)
+
+	diff := "--- a/target.txt\n+++ b/target.txt\n@@ -1 +1 @@\n-alpha\n+omega\n"
+	got := a.dispatch(toolCall("apply_patch", map[string]any{"diff": diff}).ToolCalls[0])
+
+	if !approved {
+		t.Fatal("approver was not consulted")
+	}
+	if !strings.Contains(got, "successfully applied") {
+		t.Fatalf("dispatch() = %q, want the patch applied", got)
+	}
+	body, err := os.ReadFile("target.txt")
+	if err != nil || string(body) != "omega\n" {
+		t.Fatalf("target.txt = %q (err %v), want the patched content", body, err)
+	}
+}
+
+func TestStepLabelsToolResultsWithTheirToolName(t *testing.T) {
+	isolate(t)
+	client := &fakeChatter{replies: []ollama.Message{
+		toolCall("find_symbol", map[string]any{"symbol": "Greet"}),
+		{Role: "assistant", Content: "done"},
+	}}
+	a := New(client, DefaultOptions())
+
+	if _, err := a.Step(context.Background(), "where is Greet"); err != nil {
+		t.Fatalf("Step() error = %v", err)
+	}
+
+	for _, m := range a.messages {
+		if m.Role == "tool" {
+			if m.ToolName != "find_symbol" {
+				t.Fatalf("tool message ToolName = %q, want find_symbol", m.ToolName)
+			}
+			return
+		}
+	}
+	t.Fatal("no tool message in history")
+}
+
+func TestTrimHistoryKeepsTheSystemPromptAndTheNewestMessages(t *testing.T) {
+	opts := DefaultOptions()
+	opts.MaxHistoryMessages = 4
+	a := New(&fakeChatter{}, opts)
+	for i := 0; i < 10; i++ {
+		a.messages = append(a.messages, ollama.Message{Role: "user", Content: strconv.Itoa(i)})
+	}
+
+	a.trimHistory()
+
+	if len(a.messages) != 5 {
+		t.Fatalf("history = %d messages, want the system prompt plus 4", len(a.messages))
+	}
+	if a.messages[0].Role != "system" {
+		t.Fatalf("history[0].Role = %q, want the system prompt kept", a.messages[0].Role)
+	}
+	if a.messages[1].Content != "6" || a.messages[4].Content != "9" {
+		t.Fatalf("history = %v, want the newest messages retained", a.messages[1:])
+	}
+}
+
+func TestTrimHistoryNeverLeavesAnOrphanToolResult(t *testing.T) {
+	opts := DefaultOptions()
+	opts.MaxHistoryMessages = 3
+	a := New(&fakeChatter{}, opts)
+	a.messages = append(a.messages,
+		ollama.Message{Role: "user", Content: "old"},
+		toolCall("find_symbol", map[string]any{"symbol": "X"}),
+		ollama.Message{Role: "tool", ToolName: "find_symbol", Content: "r1"},
+		ollama.Message{Role: "tool", ToolName: "find_symbol", Content: "r2"},
+		ollama.Message{Role: "assistant", Content: "answer"},
+	)
+
+	a.trimHistory()
+
+	if a.messages[1].Role == "tool" {
+		t.Fatalf("history = %v, want no tool result without the call it answers", a.messages[1:])
+	}
+	if a.messages[len(a.messages)-1].Content != "answer" {
+		t.Fatal("trimming dropped the newest message")
+	}
+}
+
+func TestTrimHistoryLeavesShortHistoriesAlone(t *testing.T) {
+	a := New(&fakeChatter{}, DefaultOptions())
+	a.messages = append(a.messages, ollama.Message{Role: "user", Content: "hi"})
+
+	a.trimHistory()
+
+	if len(a.messages) != 2 {
+		t.Fatalf("history = %d messages, want it untouched", len(a.messages))
+	}
+}
+
+func TestTrimHistoryTreatsANonPositiveBudgetAsUnlimited(t *testing.T) {
+	opts := DefaultOptions()
+	opts.MaxHistoryMessages = 0
+	a := New(&fakeChatter{}, opts)
+	for i := 0; i < 50; i++ {
+		a.messages = append(a.messages, ollama.Message{Role: "user", Content: "x"})
+	}
+
+	a.trimHistory()
+
+	if len(a.messages) != 51 {
+		t.Fatalf("history = %d messages, want an unlimited budget to keep them all", len(a.messages))
+	}
+}
+
+func TestTrimHistoryHandlesEmptyHistory(t *testing.T) {
+	a := New(&fakeChatter{}, DefaultOptions())
+	a.messages = nil
+
+	a.trimHistory()
+
+	if len(a.messages) != 0 {
+		t.Fatalf("history = %v, want it left empty", a.messages)
+	}
+}
+
+func TestHistorySizeReportsCountAndBytes(t *testing.T) {
+	a := New(&fakeChatter{}, DefaultOptions())
+	a.messages = []ollama.Message{{Role: "system", Content: "abc"}, {Role: "user", Content: "de"}}
+
+	msgs, bytes := a.HistorySize()
+
+	if msgs != 2 || bytes != 5 {
+		t.Fatalf("HistorySize() = (%d, %d), want (2, 5)", msgs, bytes)
+	}
+}
+
 func TestOptionsBoundToolBudgets(t *testing.T) {
 	dir := isolate(t)
 	if err := os.WriteFile(filepath.Join(dir, "sample.go"), []byte("a\nb\nc\nd\n"), 0o644); err != nil {
@@ -489,5 +702,47 @@ func TestSearchBudgetsReachRipgrep(t *testing.T) {
 	}
 	if !strings.Contains(string(argv), "--max-count=1") {
 		t.Fatalf("ripgrep argv = %q, want the configured per-file budget", argv)
+	}
+}
+
+func TestLastUsageSumsEveryCallInTheTurn(t *testing.T) {
+	isolate(t)
+	client := &fakeChatter{
+		usage: ollama.Usage{PromptTokens: 100, GenTokens: 10},
+		replies: []ollama.Message{
+			toolCall("find_symbol", map[string]any{"symbol": "Greet"}),
+			{Role: "assistant", Content: "done"},
+		},
+	}
+	a := New(client, DefaultOptions())
+
+	if _, err := a.Step(context.Background(), "hi"); err != nil {
+		t.Fatalf("Step() error = %v", err)
+	}
+
+	usage, calls := a.LastUsage()
+	// Two model calls at 100/10 each, one tool call between them.
+	if usage.PromptTokens != 200 || usage.GenTokens != 20 {
+		t.Fatalf("LastUsage() = %+v, want both calls counted", usage)
+	}
+	if calls != 1 {
+		t.Fatalf("tool calls = %d, want 1", calls)
+	}
+}
+
+func TestLastUsageResetsBetweenTurns(t *testing.T) {
+	isolate(t)
+	client := &fakeChatter{usage: ollama.Usage{PromptTokens: 7, GenTokens: 3}}
+	a := New(client, DefaultOptions())
+
+	for i := 0; i < 2; i++ {
+		if _, err := a.Step(context.Background(), "hi"); err != nil {
+			t.Fatalf("Step() error = %v", err)
+		}
+	}
+
+	usage, _ := a.LastUsage()
+	if usage.PromptTokens != 7 || usage.GenTokens != 3 {
+		t.Fatalf("LastUsage() = %+v, want only the most recent turn", usage)
 	}
 }
