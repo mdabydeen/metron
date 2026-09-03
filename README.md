@@ -513,7 +513,7 @@ Keep new tools narrow and output-bounded — that constraint is the entire point
 codebase. Three edits:
 
 1. Implement it in `tools` as a method on `Env`, taking its budget from `Env.Budgets`.
-2. Add its JSON schema to the package-level `toolDefs` slice in `internal/agent/loop.go`.
+2. Add its name to `tools.ToolNames`, and its JSON schema to the package-level `toolDefs` map in `agent/loop.go`.
 3. Add a `case` for it in `Agent.dispatch`.
 
 Then extend `TestDispatchRoutesToolsAndReportsErrors` and `TestStepAdvertisesEveryTool`.
@@ -537,7 +537,7 @@ make check    # all of the above
 - **Ollama** is replaced by `httptest` servers that assert on the outgoing request body and
   return scripted replies, including tool calls.
 - **`rg` and `ctags`** are replaced by executable shell-script shims written into a temp
-  directory that becomes the entire `PATH` (see `internal/tools/helpers_test.go`). An empty
+  directory that becomes the entire `PATH` (see `tools/helpers_test.go`). An empty
   shim directory is how the "binary not installed" branches get exercised.
 - **git** is used for real, in throwaway repositories under `t.TempDir()`; those tests skip
   themselves if git is missing.

@@ -60,7 +60,7 @@ is pre-1.0, the minor version is bumped for breaking changes to configuration or
 - An OpenAI-compatible provider, selected with `"provider": "openai"`. One wire format
   reaches llama.cpp's server, LM Studio, vLLM, OpenRouter and Ollama's own compatibility
   endpoint, so metron works with whatever you already run. The agent's vocabulary moved to
-  `internal/llm`, so the loop no longer knows whose API is on the other end. An API key is
+  `llm`, so the loop no longer knows whose API is on the other end. An API key is
   named by `api_key_env` and read from the environment, never held in a config file.
 - Session persistence. With `save_sessions` on, the conversation is written to
   `.metron/sessions/<id>.jsonl` as each turn completes, and `/save`, `/sessions`,
