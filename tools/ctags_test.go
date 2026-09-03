@@ -8,11 +8,11 @@ import (
 )
 
 const sampleTags = `!_TAG_FILE_FORMAT	2	/extended format/
-Agent	internal/agent/loop.go	/^type Agent struct$/;"	kind:struct	line:22
-Step	internal/agent/loop.go	/^func (a *Agent) Step$/;"	kind:func	line:36
-Bare	internal/tools/bare.go	/^func Bare$/;"
+Agent	agent/loop.go	/^type Agent struct$/;"	struct	line:22	end:30
+Step	agent/loop.go	/^func (a *Agent) Step$/;"	kind:func	line:36
+Bare	tools/bare.go	/^func Bare$/;"
 Short	two-fields-only
-Agent	internal/other/dup.go	/^type Agent$/;"	kind:type	line:9
+Agent	other/dup.go	/^type Agent$/;"	kind:type	line:9
 `
 
 func TestEnsureTagsSkipsWhenTagsFileExists(t *testing.T) {
@@ -260,8 +260,10 @@ func TestFindSymbolMatchesExactSymbolAcrossFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FindSymbol() error = %v", err)
 	}
-	want := "Agent [struct] -> internal/agent/loop.go:22\n" +
-		"Agent [type] -> internal/other/dup.go:9"
+	// The first entry uses the bare kind field real Universal Ctags emits, and
+	// carries an end line; the second uses the prefixed form. Both must parse.
+	want := "Agent [struct] -> agent/loop.go:22-30\n" +
+		"Agent [type] -> other/dup.go:9"
 	if got != want {
 		t.Fatalf("FindSymbol() =\n%q\nwant\n%q", got, want)
 	}
@@ -275,7 +277,7 @@ func TestFindSymbolDefaultsMissingKindAndLineFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FindSymbol() error = %v", err)
 	}
-	if got != "Bare [sym] -> internal/tools/bare.go:unknown" {
+	if got != "Bare [sym] -> tools/bare.go:unknown" {
 		t.Fatalf("FindSymbol() = %q, want the sym/unknown fallbacks", got)
 	}
 }
@@ -344,5 +346,42 @@ func TestFindSymbolSkipsPathsOutsideTheProject(t *testing.T) {
 	}
 	if got, _ := env.FindSymbol("Inside"); !strings.Contains(got, "inside.go") {
 		t.Fatalf("FindSymbol() = %q, want in-project symbols still reported", got)
+	}
+}
+
+// TestFindSymbolReadsTheKindFormatRealCtagsEmits is the regression test for a
+// bug the shims hid. Universal Ctags writes the kind as a bare field -- "func",
+// not "kind:func" -- so every real lookup reported "sym" and discarded the one
+// field that tells the model what it found. The hermetic shims emitted the
+// prefixed form, which is exactly why nothing noticed until the integration
+// image was asked what ctags actually produces.
+func TestFindSymbolReadsTheKindFormatRealCtagsEmits(t *testing.T) {
+	workdir(t)
+	writeFile(t, "greet.go", "x\n")
+	writeFile(t, ".tags",
+		"Greet\tgreet.go\t/^func Greet() string {$/;\"\tfunc\tline:3\tpackage:main\tend:5\n")
+
+	got, err := defaultEnv(t).FindSymbol("Greet")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "Greet [func] -> greet.go:3-5" {
+		t.Fatalf("FindSymbol() = %q, want the bare kind field read", got)
+	}
+}
+
+func TestFindSymbolDoesNotMistakeThePatternForAKind(t *testing.T) {
+	workdir(t)
+	writeFile(t, "bare.go", "x\n")
+	// The search pattern sits at index 2 and contains no colon, so a scan that
+	// began there would report it as the kind.
+	writeFile(t, ".tags", "Bare\tbare.go\t/^func Bare$/;\"\n")
+
+	got, err := defaultEnv(t).FindSymbol("Bare")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "[sym]") {
+		t.Fatalf("FindSymbol() = %q, want the pattern not read as a kind", got)
 	}
 }

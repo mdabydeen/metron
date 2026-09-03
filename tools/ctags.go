@@ -145,10 +145,24 @@ func (e Env) findInTags(symbol string) ([]string, error) {
 				continue
 			}
 			lineNo, end, kind := "unknown", "", "sym"
-			for _, p := range parts[2:] {
+			// Extension fields start after the name, the file and the search
+			// pattern, so the scan begins at index 3. Starting at 2 would let
+			// the pattern itself be mistaken for a bare kind field.
+			var fields []string
+			if len(parts) > 3 {
+				fields = parts[3:]
+			}
+			for _, p := range fields {
 				lineNo = fieldValue(p, "line:", lineNo)
 				end = fieldValue(p, "end:", end)
 				kind = fieldValue(p, "kind:", kind)
+				// Universal Ctags writes the kind as a bare field -- "func",
+				// not "kind:func" -- unless asked otherwise. Only the prefixed
+				// form was read, so every real lookup reported "sym" and threw
+				// away the one field that tells the model what it found. The
+				// test shims emitted the prefixed form, which is exactly why
+				// nothing noticed.
+				kind = bareKind(p, kind)
 			}
 			matches = append(matches, formatSymbol(parts[0], kind, parts[1], lineNo, end))
 		}
@@ -169,6 +183,15 @@ func fieldValue(field, prefix, current string) string {
 // it is one line, or when the index did not record an end -- an older Universal
 // Ctags, or a hand-written index. Nothing downstream parses this, but the model
 // reads it on every lookup, so it stays as short as it can be.
+// bareKind reads an unprefixed kind field. Every other extension field carries
+// a "name:" prefix, so an extension field with no colon in it is the kind.
+func bareKind(field, current string) string {
+	if current != "sym" || field == "" || strings.Contains(field, ":") {
+		return current
+	}
+	return field
+}
+
 func formatSymbol(name, kind, path, start, end string) string {
 	loc := path + ":" + start
 	if end != "" && end != start {
