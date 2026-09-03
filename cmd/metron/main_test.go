@@ -16,13 +16,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mdabydeen/metron/internal/agent"
+	"github.com/mdabydeen/metron/agent"
 	"github.com/mdabydeen/metron/internal/config"
-	"github.com/mdabydeen/metron/internal/llm"
-	"github.com/mdabydeen/metron/internal/ollama"
-	"github.com/mdabydeen/metron/internal/openai"
 	"github.com/mdabydeen/metron/internal/session"
-	"github.com/mdabydeen/metron/internal/tools"
+	"github.com/mdabydeen/metron/llm"
+	"github.com/mdabydeen/metron/ollama"
+	"github.com/mdabydeen/metron/openai"
+	"github.com/mdabydeen/metron/tools"
 )
 
 // testEnv returns a tools.Env rooted at the test's working directory, so a test

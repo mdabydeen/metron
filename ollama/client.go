@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mdabydeen/metron/internal/llm"
+	"github.com/mdabydeen/metron/llm"
 )
 
 // ChatRequest is Ollama's wire format for /api/chat. It is deliberately not the

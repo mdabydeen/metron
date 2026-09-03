@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mdabydeen/metron/internal/llm"
+	"github.com/mdabydeen/metron/llm"
 )
 
 func store(t *testing.T) Store {

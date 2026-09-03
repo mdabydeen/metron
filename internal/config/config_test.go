@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mdabydeen/metron/internal/tools"
+	"github.com/mdabydeen/metron/tools"
 )
 
 // isolate removes every source of configuration so a test starts from a known

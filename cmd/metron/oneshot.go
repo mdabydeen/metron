@@ -9,8 +9,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/mdabydeen/metron/internal/agent"
-	"github.com/mdabydeen/metron/internal/tools"
+	"github.com/mdabydeen/metron/agent"
+	"github.com/mdabydeen/metron/tools"
 )
 
 // Result is what `metron -p ... --json` prints: exactly one object on stdout,

@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mdabydeen/metron/internal/llm"
 	"github.com/mdabydeen/metron/internal/repomap"
-	"github.com/mdabydeen/metron/internal/tools"
+	"github.com/mdabydeen/metron/llm"
+	"github.com/mdabydeen/metron/tools"
 )
 
 // Options bounds the agent loop and carries the environment the tools run in.
@@ -24,6 +24,11 @@ type Options struct {
 	// and the budgets they enforce. A zero Root is resolved at New, so a caller
 	// that only cares about the loop can leave it alone.
 	Env tools.Env
+
+	// SystemPromptExtra is appended to the generated system prompt, for the
+	// per-model nudges that would otherwise accumulate as folklore in the
+	// binary. It is paid for on every request, like the rest of the prompt.
+	SystemPromptExtra string
 
 	// MaxPromptTokens caps what one Step may spend on prompt tokens across all
 	// its round-trips. Zero means no ceiling.
@@ -208,7 +213,11 @@ func (a *Agent) calibrate(promptTokens int) {
 // Restore rebuild it against the tree as it is now, not as it was when the
 // session started.
 func (a *Agent) seed() []llm.Message {
-	msgs := []llm.Message{{Role: "system", Content: systemPrompt(a.advertised)}}
+	prompt := systemPrompt(a.advertised)
+	if extra := strings.TrimSpace(a.opts.SystemPromptExtra); extra != "" {
+		prompt += "\n" + extra
+	}
+	msgs := []llm.Message{{Role: "system", Content: prompt}}
 	if a.opts.RepoMapTokens <= 0 {
 		return msgs
 	}

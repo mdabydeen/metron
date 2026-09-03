@@ -11,6 +11,8 @@
   "top_p": 0.95,
   "num_ctx": 16384,
 
+  "system_prompt_extra": "",
+
   "max_turns": 10,
   "compact_threshold_bytes": 400,
   "max_history_messages": 60,

@@ -336,7 +336,7 @@ and then spends the rest of the turn budget adjusting numbers. `edit_file` asks 
 quote the lines it already read.
 
 ```
-edit_file(path="internal/tools/slice.go",
+edit_file(path="tools/slice.go",
           search="\tif end-start > maxLines {",
           replace="\tif end-start >= maxLines {")
 ```
@@ -443,14 +443,23 @@ asked to find out.
 Choose these entries with the care you would give a sudoers file. `"go"` permits
 `go run ./anything`; `"make"` permits whatever the Makefile does. See [SECURITY.md](SECURITY.md).
 
+## Using it as a library
+
+The agent loop is importable — `agent`, `tools`, `llm` and the two providers sit outside
+`internal/`. See [API.md](API.md) for the smallest useful program and, more importantly, for
+what is *not* stable yet and why.
+
 ## Architecture
 
 ```
 cmd/metron/main.go   REPL and commands. No conversation state lives here.
 internal/config      Settings: defaults, JSON file, environment, validation.
-internal/ollama      HTTP client for Ollama's /api/chat, plus the shared wire types.
-internal/agent       The agent loop, the system prompt, tool schemas, compaction.
-internal/tools       The six tools, the project confinement, the dependency check.
+llm                  The provider-neutral vocabulary the loop speaks.
+ollama, openai       The two providers, each translating at its own edge.
+agent                The agent loop, the system prompt, tool schemas, compaction, budgets.
+tools                The seven tools, the project confinement, the dependency check.
+internal/repomap     The ranked project summary injected once per session.
+internal/session     Conversation transcripts as JSONL.
 ```
 
 Seams are interfaces, so each layer can be driven in isolation: `agent.New` takes a `Chatter`
@@ -503,7 +512,7 @@ and small.
 Keep new tools narrow and output-bounded — that constraint is the entire point of this
 codebase. Three edits:
 
-1. Implement it in `internal/tools` as a plain function returning `(string, error)`.
+1. Implement it in `tools` as a method on `Env`, taking its budget from `Env.Budgets`.
 2. Add its JSON schema to the package-level `toolDefs` slice in `internal/agent/loop.go`.
 3. Add a `case` for it in `Agent.dispatch`.
 

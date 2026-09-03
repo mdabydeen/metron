@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mdabydeen/metron/internal/llm"
+	"github.com/mdabydeen/metron/llm"
 )
 
 // chatRequest is the wire format. It is not the agent's vocabulary: that lives

@@ -13,11 +13,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mdabydeen/metron/internal/agent"
+	"github.com/mdabydeen/metron/agent"
 	"github.com/mdabydeen/metron/internal/config"
-	"github.com/mdabydeen/metron/internal/llm"
-	"github.com/mdabydeen/metron/internal/ollama"
-	"github.com/mdabydeen/metron/internal/tools"
+	"github.com/mdabydeen/metron/llm"
+	"github.com/mdabydeen/metron/ollama"
+	"github.com/mdabydeen/metron/tools"
 )
 
 // TestEndToEndPatchSession wires the real HTTP client, agent loop and tools

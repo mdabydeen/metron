@@ -31,6 +31,12 @@ is pre-1.0, the minor version is bumped for breaking changes to configuration or
   a git repository withdraws `apply_patch`. Their schemas are then not sent at all, and the
   system prompt stops naming them — on a stock Mac that is ~164 fewer prompt tokens on every
   request. A call to an unadvertised tool is refused before it runs.
+- The agent loop is importable: `agent`, `tools`, `llm`, `ollama` and `openai` moved out of
+  `internal/`. `API.md` documents the surface and states plainly that it is unstable until
+  v1.0.0, along with the three things that have to be true first.
+- `system_prompt_extra` appends per-model nudges to the generated system prompt. They live in
+  config rather than in the binary, so metron ships no unverified claims about particular
+  models and `make bench` can decide which nudges earn the tokens they cost.
 - `max_prompt_tokens` caps what a single turn may spend, and `/budget` sets it mid-session.
   Every other budget bounds one tool; this bounds the turn. Enforcement is predictive --
   token counts only arrive after the tokens are spent -- and the estimate is corrected

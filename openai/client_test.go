@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mdabydeen/metron/internal/llm"
+	"github.com/mdabydeen/metron/llm"
 )
 
 // serve runs a stub endpoint that hands back the given body, and records the

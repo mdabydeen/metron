@@ -13,7 +13,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/mdabydeen/metron/internal/tools"
+	"github.com/mdabydeen/metron/tools"
 )
 
 // Config is the full set of tunable settings. Every field maps to a value that
@@ -44,6 +44,15 @@ type Config struct {
 	Temperature float64 `json:"temperature"`
 	TopP        float64 `json:"top_p"`
 	NumCtx      int     `json:"num_ctx"`
+
+	// SystemPromptExtra is appended to the generated system prompt.
+	//
+	// Different models need different nudges to stay inside the tool contract,
+	// and those nudges are folklore until something measures them. Keeping them
+	// in config rather than baked into the binary means metron ships no
+	// unverified claims about particular models, and `make bench` can settle
+	// which ones earn the tokens they cost on every request.
+	SystemPromptExtra string `json:"system_prompt_extra"`
 
 	// Agent loop
 	MaxTurns           int `json:"max_turns"`
@@ -115,6 +124,7 @@ func Defaults() Config {
 		Temperature:        0.1,
 		TopP:               0.95,
 		NumCtx:             16384,
+		SystemPromptExtra:  "",
 		MaxTurns:           10,
 		CompactThreshold:   400,
 		MaxHistoryMessages: 60,

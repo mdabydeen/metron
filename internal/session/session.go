@@ -20,7 +20,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mdabydeen/metron/internal/llm"
+	"github.com/mdabydeen/metron/llm"
 )
 
 // Dir is the directory, relative to the project root, that metron keeps its own

@@ -14,13 +14,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mdabydeen/metron/internal/agent"
+	"github.com/mdabydeen/metron/agent"
 	"github.com/mdabydeen/metron/internal/config"
-	"github.com/mdabydeen/metron/internal/llm"
-	"github.com/mdabydeen/metron/internal/ollama"
-	"github.com/mdabydeen/metron/internal/openai"
 	"github.com/mdabydeen/metron/internal/session"
-	"github.com/mdabydeen/metron/internal/tools"
+	"github.com/mdabydeen/metron/llm"
+	"github.com/mdabydeen/metron/ollama"
+	"github.com/mdabydeen/metron/openai"
+	"github.com/mdabydeen/metron/tools"
 )
 
 const helpText = `Commands:
@@ -167,6 +167,7 @@ func runMain(args []string, in io.Reader, out, errOut io.Writer) int {
 		MaxHistoryMessages: cfg.MaxHistoryMessages,
 		RepoMapTokens:      cfg.RepoMapTokens,
 		MaxPromptTokens:    cfg.MaxPromptTokens,
+		SystemPromptExtra:  cfg.SystemPromptExtra,
 		Env:                env,
 		DisabledTools:      cfg.DisabledTools,
 		Progress:           out,

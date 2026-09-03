@@ -12,8 +12,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mdabydeen/metron/internal/llm"
-	"github.com/mdabydeen/metron/internal/tools"
+	"github.com/mdabydeen/metron/llm"
+	"github.com/mdabydeen/metron/tools"
 )
 
 // fakeChatter replays a scripted sequence of model replies and records the
@@ -1632,5 +1632,34 @@ func TestBudgetAccessors(t *testing.T) {
 	if a.EstimatedPromptTokens() <= 0 {
 		t.Fatalf("EstimatedPromptTokens() = %d, want the seeded history counted",
 			a.EstimatedPromptTokens())
+	}
+}
+
+func TestSystemPromptExtraIsAppended(t *testing.T) {
+	isolate(t)
+	opts := DefaultOptions()
+	opts.SystemPromptExtra = "Always call view_slice before editing."
+
+	a := New(&fakeChatter{}, opts)
+
+	// The generated contract comes first; the nudge is additional, never a
+	// replacement for the tool rules the whole program depends on.
+	if !strings.Contains(a.messages[0].Content, "NEVER guess") {
+		t.Fatalf("prompt = %q, want the generated contract kept", a.messages[0].Content)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(a.messages[0].Content), "Always call view_slice before editing.") {
+		t.Fatalf("prompt = %q, want the nudge appended", a.messages[0].Content)
+	}
+}
+
+func TestSystemPromptExtraIgnoresWhitespace(t *testing.T) {
+	isolate(t)
+	opts := DefaultOptions()
+	opts.SystemPromptExtra = "   \n  "
+	bare := New(&fakeChatter{}, DefaultOptions()).messages[0].Content
+
+	// A blank setting must not add a trailing newline paid for on every request.
+	if got := New(&fakeChatter{}, opts).messages[0].Content; got != bare {
+		t.Fatalf("prompt = %q, want a whitespace-only nudge to cost nothing", got)
 	}
 }
