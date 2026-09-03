@@ -518,6 +518,18 @@ earlier bare `Error: ripgrep error:`, the same model retried `search_text` **eig
 exhausted the turn budget without editing anything. Told plainly that the tool is unavailable
 and not to retry, it tried once, fell back to `view_slice`, and finished the job.
 
+## Benchmark
+
+`make bench` measures metron over ten seeded repair tasks, across the models and edit formats
+in [`bench/matrix.json`](bench/matrix.json), and reports a pass **rate** with median and p95
+prompt tokens. Each task ships a `verify.sh` that judges the repository the model left behind
+and never the answer text, so a confident sentence cannot pass a task; two of the ten
+(`no-such-symbol`, `ambiguous-symbol`) pass only when the model declines to guess. It needs a
+live Ollama server and is deliberately not part of `make check`.
+
+See [bench/README.md](bench/README.md) for the task list, the prompt-token ceiling on
+`large-file-edit`, and how to add a task.
+
 ## Limitations
 
 - No fallback if `rg` or a compatible `ctags` is missing; the affected tool reports the error

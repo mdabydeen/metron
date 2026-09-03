@@ -1,0 +1,10 @@
+{
+  "name": "large-file-edit",
+  "tags": [
+    "edit",
+    "large-file",
+    "token-discipline"
+  ],
+  "timeout_seconds": 600,
+  "max_prompt_tokens": 20000
+}

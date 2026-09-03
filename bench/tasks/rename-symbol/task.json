@@ -1,0 +1,8 @@
+{
+  "name": "rename-symbol",
+  "tags": [
+    "edit",
+    "multi-file"
+  ],
+  "timeout_seconds": 300
+}

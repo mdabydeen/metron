@@ -1,0 +1,1 @@
+Exactly one function calls compute. Add the line "// called by <Name>" directly above the "func compute(" line, with the real caller's name in place of <Name>. Change nothing else.

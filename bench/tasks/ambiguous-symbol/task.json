@@ -1,0 +1,8 @@
+{
+  "name": "ambiguous-symbol",
+  "tags": [
+    "navigation",
+    "precision"
+  ],
+  "timeout_seconds": 300
+}
