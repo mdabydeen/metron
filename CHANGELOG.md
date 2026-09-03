@@ -6,7 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While metron
 is pre-1.0, the minor version is bumped for breaking changes to configuration or CLI flags.
 
-## [Unreleased]
+## [0.1.0] — 2026-09-03
+
+The first tagged release.
 
 ### Added
 
@@ -71,6 +73,14 @@ is pre-1.0, the minor version is bumped for breaking changes to configuration or
   and how long each took, the tokens it cost, and the files it changed. `files_changed` comes
   from `git status`, so it is true whichever edit format was used. A failed run still emits a
   valid object.
+
+### Decided against
+
+- **MCP support.** Every budget metron enforces is one it implements itself; an MCP server
+  brings a tool surface metron did not write and cannot bound -- schemas of arbitrary size on
+  every request, results of arbitrary size into the context window. That is the one guarantee
+  this program makes, so the README now says why it is absent and what would have to be true
+  to change the answer.
 
 ### Security
 
@@ -138,11 +148,10 @@ is pre-1.0, the minor version is bumped for breaking changes to configuration or
   budget at all; the pattern now follows a `--` separator. `list_files` passes its glob as
   `--glob=<pattern>` for the same reason.
 
-## [0.1.0] — unreleased
+### Earlier work
 
-First tagged release. Everything below was developed before the changelog existed.
+The first cut, developed before this changelog existed.
 
-### Added
 
 - REPL with `/help`, `/config`, `/reset`, `/history`, `/tags` and `/exit`.
 - Five budgeted tools: `list_files`, `find_symbol`, `search_text`, `view_slice` and
@@ -159,5 +168,4 @@ First tagged release. Everything below was developed before the changelog existe
 - Streaming replies, with an idle watchdog that bounds silence rather than total generation
   time, and Ctrl-C cancellation of a turn in progress.
 
-[Unreleased]: https://github.com/mdabydeen/metron/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/mdabydeen/metron/releases/tag/v0.1.0

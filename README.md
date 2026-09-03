@@ -618,6 +618,30 @@ live Ollama server and is deliberately not part of `make check`.
 See [bench/README.md](bench/README.md) for the task list, the prompt-token ceiling on
 `large-file-edit`, and how to add a task.
 
+## Why there is no MCP support
+
+metron does not speak the Model Context Protocol, and this is a decision rather
+than a gap.
+
+Every budget in the table at the top of this file is enforced by metron itself:
+`view_slice` refuses a wide range, `search_text` truncates and says so, the whole
+turn is bounded by `max_prompt_tokens`. An MCP server arrives with a tool surface
+metron did not write and cannot bound — schemas of arbitrary size paid for on
+every request, and results of arbitrary size returned into the context window.
+The one guarantee this program makes is the one thing MCP would take away.
+
+That is not an argument that MCP is bad. It is an argument that "connect to
+anything" and "the model never sees more than N tokens" are different products,
+and metron is the second one. If you want the first, [several excellent tools
+exist](https://modelcontextprotocol.io) and you should use one.
+
+The conditions under which this could change: every server's schemas counted and
+shown in `/config`, results clipped through the same byte budgets as native
+tools, servers off by default, and a hard cap on advertised tools. If someone
+wants to build that, the tool advertisement seam in `agent/loop.go` is where it
+would go. Until then, the refusal is a better advertisement for what metron is
+than the feature would be.
+
 ## Limitations
 
 - No fallback if `rg` or a compatible `ctags` is missing; the affected tool reports the error
