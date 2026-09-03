@@ -8,8 +8,7 @@ import (
 )
 
 func TestParseMetronOutput(t *testing.T) {
-	// A banner on stdout must not sink the run: the last line is the report.
-	out, err := parseMetronOutput("loading model...\n" + okOutput + "\n\n")
+	out, err := parseMetronOutput(okOutput + "\n\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -18,6 +17,35 @@ func TestParseMetronOutput(t *testing.T) {
 	}
 	if len(out.FilesChanged) != 1 || out.FilesChanged[0] != "a.go" {
 		t.Fatalf("files changed = %v", out.FilesChanged)
+	}
+}
+
+// TestParseMetronOutputAcceptsIndentedJSON is the regression test for an
+// integration bug between two workstreams: metron prints its report indented,
+// for the human who runs --json directly, and a line-oriented parse saw only
+// the closing brace. In a results table that reads as a model that cannot code.
+func TestParseMetronOutputAcceptsIndentedJSON(t *testing.T) {
+	indented := "{\n  \"answer\": \"done\",\n  \"ok\": true,\n  \"turns\": 3,\n" +
+		"  \"usage\": {\n    \"prompt\": 900,\n    \"generated\": 40\n  },\n" +
+		"  \"files_changed\": [\n    \"a.go\"\n  ]\n}\n"
+
+	out, err := parseMetronOutput(indented)
+	if err != nil {
+		t.Fatalf("parseMetronOutput() = %v, want an indented object accepted", err)
+	}
+	if out.Turns != 3 || out.Usage.Prompt != 900 || len(out.FilesChanged) != 1 {
+		t.Fatalf("parsed %+v, want the indented report read in full", out)
+	}
+}
+
+func TestParseMetronOutputIgnoresTrailingNoise(t *testing.T) {
+	// Anything after the object is ignored rather than fatal.
+	out, err := parseMetronOutput(okOutput + "\nstray trailing banner\n")
+	if err != nil {
+		t.Fatalf("parseMetronOutput() = %v, want trailing noise tolerated", err)
+	}
+	if out.Turns != 2 {
+		t.Fatalf("parsed %+v", out)
 	}
 }
 

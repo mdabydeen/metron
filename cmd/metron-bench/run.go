@@ -31,22 +31,20 @@ type metronOutput struct {
 
 // parseMetronOutput reads the report from a run's stdout.
 //
-// It takes the last non-empty line rather than the whole stream: metron sends
-// diagnostics to stderr, but a stray banner on stdout should degrade the
-// benchmark into a parse of the right line, not into a failed cell that looks
-// like a model regression.
+// It decodes the whole stream rather than a single line. `metron -p --json`
+// guarantees one object on stdout and nothing else, but it prints that object
+// indented for the human who runs the flag directly -- so a line-oriented parse
+// sees a closing brace and calls a working run a parse failure, which in a
+// results table is indistinguishable from a model that cannot code.
+//
+// Anything after the object is ignored rather than fatal: a stray trailing
+// banner should not turn a good cell into a failed one.
 func parseMetronOutput(stdout string) (metronOutput, error) {
 	var out metronOutput
-	var last string
-	for _, line := range strings.Split(stdout, "\n") {
-		if strings.TrimSpace(line) != "" {
-			last = strings.TrimSpace(line)
-		}
-	}
-	if last == "" {
+	if strings.TrimSpace(stdout) == "" {
 		return out, fmt.Errorf("no JSON on stdout")
 	}
-	if err := json.Unmarshal([]byte(last), &out); err != nil {
+	if err := json.NewDecoder(strings.NewReader(stdout)).Decode(&out); err != nil {
 		return out, fmt.Errorf("parse metron output: %w", err)
 	}
 	return out, nil
