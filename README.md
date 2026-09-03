@@ -83,13 +83,20 @@ Released binaries and `make build` both carry the real one.
 
 ## Usage
 
-Run metron **from the root of the repository you want it to work on** — every tool resolves
-paths relative to the process working directory, and the ctags index is written to `./.tags`.
+Run metron anywhere inside the repository you want it to work on. It finds the enclosing
+git work tree and treats that as the project: tools resolve paths against it, and the ctags
+index is written to `<project>/.tags` regardless of which subdirectory you started in.
+Outside a repository, the working directory is the project.
 
 ```bash
 cd ~/code/my-project
 metron
 ```
+
+**The project directory is also a boundary.** Every path a tool touches is resolved and
+refused if it lands outside — `view_slice` will not read `~/.ssh/id_rsa`, and `apply_patch`
+will not write to `../..`. Symlinks are followed before the check, so a link out of the tree
+does not get around it. See [SECURITY.md](SECURITY.md).
 
 ### One-shot mode
 
@@ -435,9 +442,9 @@ and not to retry, it tried once, fell back to `view_slice`, and finished the job
 - Trimming history drops the oldest exchanges silently; the model is not told that earlier
   context is gone.
 - Conversation history is lost when you exit.
+- The agent cannot run anything, so it cannot check whether its own edit worked.
 
-Two of these — automatic `.tags` invalidation and silent history trimming — are being
-addressed. See [CHANGELOG.md](CHANGELOG.md) for what has landed.
+These are being addressed. See [CHANGELOG.md](CHANGELOG.md) for what has landed.
 
 ## Contributing
 

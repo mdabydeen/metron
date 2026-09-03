@@ -7,6 +7,29 @@ import (
 	"testing"
 )
 
+// testEnv returns an Env rooted at the test's working directory. Root is taken
+// from the process rather than resolved through git, so the temp directory a
+// test is chdir'd into is the boundary regardless of whether it happens to sit
+// inside a repository. repoRoot's own behaviour is tested separately.
+func testEnv(t *testing.T, b Budgets) Env {
+	t.Helper()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	real, err := filepath.EvalSymlinks(wd)
+	if err != nil {
+		t.Fatalf("resolve %s: %v", wd, err)
+	}
+	return Env{Root: real, Budgets: b}
+}
+
+// defaultEnv is testEnv with the built-in budgets.
+func defaultEnv(t *testing.T) Env {
+	t.Helper()
+	return testEnv(t, DefaultBudgets())
+}
+
 // shimDir creates a directory containing executable shell-script stand-ins for
 // external binaries and prepends it to PATH for the duration of the test.
 // Passing no scripts yields an empty PATH entry, which makes every external

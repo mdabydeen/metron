@@ -11,6 +11,7 @@ package tools
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -85,7 +86,7 @@ func TestIntegrationFindSymbolWithRealCtags(t *testing.T) {
 	requireBinary(t, "ctags")
 	sampleProject(t)
 
-	got, err := FindSymbol("Greet")
+	got, err := defaultEnv(t).FindSymbol("Greet")
 	if err != nil {
 		t.Fatalf("FindSymbol() error = %v", err)
 	}
@@ -105,7 +106,7 @@ func TestIntegrationFindSymbolMissesCleanly(t *testing.T) {
 	requireBinary(t, "ctags")
 	sampleProject(t)
 
-	got, err := FindSymbol("NoSuchSymbol")
+	got, err := defaultEnv(t).FindSymbol("NoSuchSymbol")
 	if err != nil {
 		t.Fatalf("FindSymbol() error = %v", err)
 	}
@@ -119,7 +120,7 @@ func TestIntegrationRebuildTagsWithRealCtags(t *testing.T) {
 	sampleProject(t)
 	writeFile(t, ".tags", "stale\n")
 
-	if err := RebuildTags(); err != nil {
+	if err := defaultEnv(t).RebuildTags(); err != nil {
 		t.Fatalf("RebuildTags() error = %v", err)
 	}
 	b, err := os.ReadFile(".tags")
@@ -138,7 +139,7 @@ func TestIntegrationSearchTextWithRealRipgrep(t *testing.T) {
 	requireBinary(t, "rg")
 	sampleProject(t)
 
-	got, err := SearchText("hello", 10, 2)
+	got, err := testEnv(t, Budgets{SearchMaxMatches: 10, SearchMaxPerFile: 2}).SearchText("hello")
 	if err != nil {
 		t.Fatalf("SearchText() error = %v", err)
 	}
@@ -162,7 +163,7 @@ func TestIntegrationSearchTextHonoursBudgets(t *testing.T) {
 	writeFile(t, "a.txt", many.String())
 	writeFile(t, "b.txt", many.String())
 
-	got, err := SearchText("needle", 3, 1)
+	got, err := testEnv(t, Budgets{SearchMaxMatches: 3, SearchMaxPerFile: 1}).SearchText("needle")
 	if err != nil {
 		t.Fatalf("SearchText() error = %v", err)
 	}
@@ -188,7 +189,7 @@ func TestIntegrationSearchTextNoMatches(t *testing.T) {
 	requireBinary(t, "rg")
 	sampleProject(t)
 
-	got, err := SearchText("zzz-not-present-zzz", 10, 2)
+	got, err := testEnv(t, Budgets{SearchMaxMatches: 10, SearchMaxPerFile: 2}).SearchText("zzz-not-present-zzz")
 	if err != nil {
 		t.Fatalf("SearchText() error = %v", err)
 	}
@@ -201,7 +202,7 @@ func TestIntegrationSearchTextInvalidRegex(t *testing.T) {
 	requireBinary(t, "rg")
 	sampleProject(t)
 
-	if _, err := SearchText("(unclosed", 10, 2); err == nil {
+	if _, err := testEnv(t, Budgets{SearchMaxMatches: 10, SearchMaxPerFile: 2}).SearchText("(unclosed"); err == nil {
 		t.Fatal("SearchText() = nil error, want ripgrep to reject the pattern")
 	}
 }
@@ -210,7 +211,7 @@ func TestIntegrationListFilesWithRealRipgrep(t *testing.T) {
 	requireBinary(t, "rg")
 	sampleProject(t)
 
-	got, err := ListFiles("", 50)
+	got, err := testEnv(t, Budgets{ListMaxEntries: 50}).ListFiles("")
 	if err != nil {
 		t.Fatalf("ListFiles() error = %v", err)
 	}
@@ -226,7 +227,7 @@ func TestIntegrationListFilesHonoursTheGlob(t *testing.T) {
 	sampleProject(t)
 	writeFile(t, "notes.md", "# notes\n")
 
-	got, err := ListFiles("*.md", 50)
+	got, err := testEnv(t, Budgets{ListMaxEntries: 50}).ListFiles("*.md")
 	if err != nil {
 		t.Fatalf("ListFiles() error = %v", err)
 	}
@@ -243,7 +244,7 @@ func TestIntegrationListFilesRespectsGitignore(t *testing.T) {
 	writeFile(t, "kept.go", "package p\n")
 	writeFile(t, "ignored.go", "package p\n")
 
-	got, err := ListFiles("", 50)
+	got, err := testEnv(t, Budgets{ListMaxEntries: 50}).ListFiles("")
 	if err != nil {
 		t.Fatalf("ListFiles() error = %v", err)
 	}
@@ -259,11 +260,97 @@ func TestIntegrationListFilesHonoursTheBudget(t *testing.T) {
 	sampleProject(t)
 	writeFile(t, "third.go", "package sample\n")
 
-	got, err := ListFiles("", 2)
+	got, err := testEnv(t, Budgets{ListMaxEntries: 2}).ListFiles("")
 	if err != nil {
 		t.Fatalf("ListFiles() error = %v", err)
 	}
 	if !strings.Contains(got, "truncated to 2 entries") {
 		t.Fatalf("ListFiles() = %q, want the budget enforced against real ripgrep", got)
+	}
+}
+
+// TestSearchTextTreatsAFlagLikePatternAsText is the case the -- separator
+// exists for. It needs real ripgrep: a shim cannot demonstrate how ripgrep's
+// own argument parser reads a leading dash.
+func TestSearchTextTreatsAFlagLikePatternAsText(t *testing.T) {
+	workdir(t)
+	writeFile(t, "notes.txt", "the --files flag\nunrelated line\n")
+	writeFile(t, "other.txt", "nothing here\n")
+
+	got, err := defaultEnv(t).SearchText("--files")
+	if err != nil {
+		t.Fatalf("SearchText() error = %v", err)
+	}
+	// Parsed as a flag, ripgrep would list every file and never mention the
+	// line the pattern actually occurs on.
+	if !strings.Contains(got, "notes.txt") || !strings.Contains(got, "--files flag") {
+		t.Fatalf("SearchText(--files) = %q, want the literal match", got)
+	}
+	if strings.Contains(got, "other.txt") {
+		t.Fatalf("SearchText(--files) = %q, want a search rather than a file listing", got)
+	}
+}
+
+// TestListFilesTreatsAFlagLikeGlobAsAGlob is the same guarantee for the --glob=
+// form: the value cannot be mistaken for a flag of its own.
+func TestListFilesTreatsAFlagLikeGlobAsAGlob(t *testing.T) {
+	workdir(t)
+	writeFile(t, "keep.md", "x\n")
+	writeFile(t, "skip.go", "package x\n")
+
+	got, err := defaultEnv(t).ListFiles("*.md")
+	if err != nil {
+		t.Fatalf("ListFiles() error = %v", err)
+	}
+	if !strings.Contains(got, "keep.md") || strings.Contains(got, "skip.go") {
+		t.Fatalf("ListFiles(*.md) = %q, want only the markdown file", got)
+	}
+}
+
+// TestApplyPatchStillRefusesEscapesWithRealGit checks metron's own boundary
+// against the real tool, so a change in git's behaviour cannot quietly widen it.
+func TestApplyPatchStillRefusesEscapesWithRealGit(t *testing.T) {
+	gitRepo(t)
+
+	got, err := defaultEnv(t).ApplyPatch(
+		"--- /dev/null\n+++ b/../../escaped.txt\n@@ -0,0 +1 @@\n+pwned\n")
+	if err != nil {
+		t.Fatalf("ApplyPatch() error = %v", err)
+	}
+	if !strings.Contains(got, "Patch rejected") {
+		t.Fatalf("ApplyPatch() = %q, want metron's own refusal before git sees it", got)
+	}
+}
+
+// TestToolsRunAtTheProjectRootFromASubdirectory is the behaviour the Env root
+// buys: metron no longer has to be started from the top of the repository.
+func TestToolsRunAtTheProjectRootFromASubdirectory(t *testing.T) {
+	root := gitRepo(t)
+	if err := os.MkdirAll(filepath.Join(root, "pkg", "deep"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(root, "pkg", "marker.go"), "package pkg\n\nfunc Marker() {}\n")
+
+	// Build the Env at the top, then descend, as running `metron` in a
+	// subdirectory would.
+	env := defaultEnv(t)
+	t.Chdir(filepath.Join(root, "pkg", "deep"))
+
+	got, err := env.ListFiles("")
+	if err != nil {
+		t.Fatalf("ListFiles() error = %v", err)
+	}
+	if !strings.Contains(got, "marker.go") {
+		t.Fatalf("ListFiles() = %q, want files listed from the project root", got)
+	}
+
+	if err := env.RebuildTags(); err != nil {
+		t.Fatalf("RebuildTags() error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".tags")); err != nil {
+		t.Fatalf(".tags not at the project root: %v", err)
+	}
+	if _, err := os.Stat(".tags"); err == nil {
+		t.Fatal(".tags was written into the subdirectory")
 	}
 }

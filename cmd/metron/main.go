@@ -121,15 +121,20 @@ func runMain(args []string, in io.Reader, out, errOut io.Writer) int {
 	scanner := bufio.NewScanner(in)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxInputLine)
 
+	// One Env, shared by the agent and by /tags, so both agree on which
+	// project they are pointed at.
+	env := tools.NewEnv(tools.Budgets{
+		MaxSliceLines:    cfg.MaxSliceLines,
+		MaxLineChars:     cfg.MaxLineChars,
+		SearchMaxMatches: cfg.SearchMaxMatches,
+		SearchMaxPerFile: cfg.SearchMaxPerFile,
+		ListMaxEntries:   cfg.ListMaxEntries,
+	})
 	opts := agent.Options{
 		MaxTurns:           cfg.MaxTurns,
 		CompactThreshold:   cfg.CompactThreshold,
 		MaxHistoryMessages: cfg.MaxHistoryMessages,
-		MaxSliceLines:      cfg.MaxSliceLines,
-		MaxLineChars:       cfg.MaxLineChars,
-		SearchMaxMatches:   cfg.SearchMaxMatches,
-		SearchMaxPerFile:   cfg.SearchMaxPerFile,
-		ListMaxEntries:     cfg.ListMaxEntries,
+		Env:                env,
 		Progress:           out,
 	}
 	autoApprove := cfg.AutoApprovePatches || f.yes
@@ -150,7 +155,7 @@ func runMain(args []string, in io.Reader, out, errOut io.Writer) int {
 		return oneShot(context.Background(), out, errOut, bot, f.prompt)
 	}
 
-	run(context.Background(), scanner, out, cfg, path, bot, streamed)
+	run(context.Background(), scanner, out, cfg, path, env, bot, streamed)
 	return 0
 }
 
@@ -196,7 +201,7 @@ func approve(out io.Writer, scanner *bufio.Scanner, diff string) bool {
 // streamed tells run that replies already reached out as they arrived, so it
 // must not print them a second time. It is a parameter rather than a read of
 // cfg.Stream because the caller is what actually wires the client's sink.
-func run(ctx context.Context, scanner *bufio.Scanner, out io.Writer, cfg config.Config, cfgPath string, bot stepper, streamed bool) {
+func run(ctx context.Context, scanner *bufio.Scanner, out io.Writer, cfg config.Config, cfgPath string, env tools.Env, bot stepper, streamed bool) {
 	fmt.Fprintf(out, "\033[1;36m=== metron (model: %s) ===\033[0m\n", cfg.Model)
 	fmt.Fprintln(out, "Context-disciplined terminal coder. /help for commands, /exit to quit.")
 	if cfgPath != "" {
@@ -215,7 +220,7 @@ func run(ctx context.Context, scanner *bufio.Scanner, out io.Writer, cfg config.
 		if input == "" {
 			continue
 		}
-		if done := command(out, input, cfg, cfgPath, bot); done {
+		if done := command(out, input, cfg, cfgPath, env, bot); done {
 			return
 		}
 		if strings.HasPrefix(input, "/") {
@@ -298,7 +303,7 @@ func step(ctx context.Context, bot stepper, input string) (string, error) {
 
 // command handles the REPL's own directives. It reports whether the REPL
 // should stop; non-command input is left for the model.
-func command(out io.Writer, input string, cfg config.Config, cfgPath string, bot stepper) (quit bool) {
+func command(out io.Writer, input string, cfg config.Config, cfgPath string, env tools.Env, bot stepper) (quit bool) {
 	switch input {
 	case "exit", "quit", "/exit", "/quit":
 		return true
@@ -314,7 +319,7 @@ func command(out io.Writer, input string, cfg config.Config, cfgPath string, bot
 		fmt.Fprintf(out, "history: %d messages, ~%d bytes (budget: %d messages; /reset clears it)\n",
 			msgs, bytes, cfg.MaxHistoryMessages)
 	case "/tags":
-		if err := tools.RebuildTags(); err != nil {
+		if err := env.RebuildTags(); err != nil {
 			fmt.Fprintf(out, "\033[31mError: %v\033[0m\n", err)
 			break
 		}

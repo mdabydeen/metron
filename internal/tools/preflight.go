@@ -23,7 +23,7 @@ var dependencies = []Dependency{
 
 // Preflight checks that every external dependency is present and usable, and
 // returns one human-readable warning per problem found. An empty result means
-// all four tools are ready. Nothing here is fatal: a missing binary only
+// every tool is ready. Nothing here is fatal: a missing binary only
 // disables the tool that needs it, and the model is told so at the point of
 // failure.
 func Preflight() []string {
@@ -73,11 +73,11 @@ func insideWorkTree() bool {
 // RebuildTags discards any existing ctags index and builds a fresh one. The
 // index is otherwise generated once and never invalidated, so this is how an
 // operator picks up renames and new files mid-session.
-func RebuildTags() error {
-	if err := os.Remove(".tags"); err != nil && !os.IsNotExist(err) {
+func (e Env) RebuildTags() error {
+	if err := os.Remove(e.tagsFile()); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove stale index: %w", err)
 	}
-	if err := EnsureTags(); err != nil {
+	if err := e.EnsureTags(); err != nil {
 		return fmt.Errorf("rebuild ctags index: %w", err)
 	}
 	return nil

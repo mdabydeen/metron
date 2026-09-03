@@ -126,7 +126,7 @@ func TestRebuildTagsReplacesStaleIndex(t *testing.T) {
 	writeFile(t, ".tags", "stale content\n")
 	shimDir(t, map[string]string{"ctags": universalCtagsShim})
 
-	if err := RebuildTags(); err != nil {
+	if err := defaultEnv(t).RebuildTags(); err != nil {
 		t.Fatalf("RebuildTags() error = %v", err)
 	}
 	b, err := os.ReadFile(".tags")
@@ -142,7 +142,7 @@ func TestRebuildTagsWithNoExistingIndex(t *testing.T) {
 	workdir(t)
 	shimDir(t, map[string]string{"ctags": universalCtagsShim})
 
-	if err := RebuildTags(); err != nil {
+	if err := defaultEnv(t).RebuildTags(); err != nil {
 		t.Fatalf("RebuildTags() error = %v, want a missing index to be fine", err)
 	}
 	if _, err := os.Stat(".tags"); err != nil {
@@ -155,7 +155,7 @@ func TestRebuildTagsReportsGenerationFailure(t *testing.T) {
 	writeFile(t, ".tags", "stale\n")
 	shimDir(t, nil)
 
-	err := RebuildTags()
+	err := defaultEnv(t).RebuildTags()
 	if err == nil || !strings.Contains(err.Error(), "rebuild ctags index") {
 		t.Fatalf("RebuildTags() error = %v, want a rebuild failure", err)
 	}
@@ -173,7 +173,7 @@ func TestRebuildTagsReportsUndeletableIndex(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
 
-	err := RebuildTags()
+	err := defaultEnv(t).RebuildTags()
 	if err == nil || !strings.Contains(err.Error(), "remove stale index") {
 		t.Fatalf("RebuildTags() error = %v, want the removal failure reported", err)
 	}

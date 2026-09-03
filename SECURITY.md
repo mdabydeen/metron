@@ -32,20 +32,33 @@ it means the threat model is unusual.
 - `-p/--prompt` without `--yes` fails closed: nobody is at the keyboard to approve, so
   patches are refused rather than applied unattended.
 
-**Known limitations in the current release** — these are real, and are being addressed:
+**Confinement.** Every path a tool touches is resolved against the project root
+-- the enclosing git work tree, or the working directory if there is none -- and
+refused if it lands outside. Symlinks are followed before the check, so a
+symlinked directory cannot be used to step out of the tree, and that holds for
+files being *created* as well as read, since the check resolves the ancestors of
+a path that does not exist yet. `view_slice` will not read `~/.ssh/id_rsa`, and
+`apply_patch` will not write to `../..`.
 
-- **No filesystem confinement.** `view_slice` will read any path the process can read,
-  including absolute paths outside the repository (`~/.ssh/id_rsa`, `/etc/passwd`), and
-  `apply_patch` can be induced to write outside the working tree with a crafted diff. Today
-  the approval prompt is the only guard on the write path, and there is no guard on the read
-  path. Confinement to the repository root is planned.
-- **Anything the model reads can reach the model's operator.** If you point metron at a
-  repository containing secrets, and the model reads them, they are in the conversation.
-  With a local Ollama server that conversation does not leave your machine; that property is
-  a consequence of your configuration, not something metron enforces.
-- **Prompt injection is not mitigated.** Content in the files metron reads is data, but a
-  sufficiently persuasive comment in a source file may influence what the model proposes.
-  The approval prompt is the mitigation. Read the diffs.
+For patches this is belt and braces rather than the only guard: `git apply`
+already rejects paths containing `..`, refuses to follow a symlinked directory
+out of the tree, and treats a leading `/` as relative to the tree rather than to
+the filesystem. metron checks anyway, so the boundary is stated in metron's own
+terms and survives a future flag or backend that loosens git's.
+
+**Remaining limitations** -- these are real:
+
+- **Anything the model reads can reach the model's operator.** If you point
+  metron at a repository containing secrets, and the model reads them, they are
+  in the conversation. With a local Ollama server that conversation does not
+  leave your machine; that property is a consequence of your configuration, not
+  something metron enforces.
+- **Confinement is the project directory, not a sandbox.** Everything inside the
+  project is fair game, including files you would rather the model not read.
+  There is no per-file policy and no allowlist.
+- **Prompt injection is not mitigated.** Content in the files metron reads is
+  data, but a sufficiently persuasive comment in a source file may influence what
+  the model proposes. The approval prompt is the mitigation. Read the diffs.
 
 **Not in scope:** the security of the model you point metron at, the security of your Ollama
 server, or model output quality. metron does not sandbox model-proposed changes beyond the
@@ -58,3 +71,5 @@ approval prompt, and does not claim to.
 - No credentials of any kind are read or stored. There is no login and no account.
 - No shell. External binaries (`rg`, `ctags`, `git`) are invoked with an explicit argument
   vector, never through `sh -c`, so a model-supplied string cannot become a shell command.
+  Model-supplied values are additionally kept out of the flag namespace -- passed after `--`
+  or as `--flag=value` -- so a pattern beginning with a dash is data rather than an option.

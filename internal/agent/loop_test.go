@@ -642,7 +642,7 @@ func TestOptionsBoundToolBudgets(t *testing.T) {
 		t.Fatal(err)
 	}
 	opts := DefaultOptions()
-	opts.MaxSliceLines = 1
+	opts.Env.Budgets.MaxSliceLines = 1
 	a := New(&fakeChatter{}, opts)
 
 	got := a.dispatch(toolCall("view_slice", map[string]any{"path": "sample.go", "start": 1, "end": 4}).ToolCalls[0])
@@ -691,7 +691,7 @@ func TestSearchBudgetsReachRipgrep(t *testing.T) {
 	t.Setenv("PATH", bin)
 
 	opts := DefaultOptions()
-	opts.SearchMaxMatches, opts.SearchMaxPerFile = 3, 1
+	opts.Env.Budgets.SearchMaxMatches, opts.Env.Budgets.SearchMaxPerFile = 3, 1
 	a := New(&fakeChatter{}, opts)
 
 	a.dispatch(toolCall("search_text", map[string]any{"pattern": "needle"}).ToolCalls[0])

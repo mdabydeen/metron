@@ -16,7 +16,24 @@ import (
 
 	"github.com/mdabydeen/metron/internal/config"
 	"github.com/mdabydeen/metron/internal/ollama"
+	"github.com/mdabydeen/metron/internal/tools"
 )
+
+// testEnv returns a tools.Env rooted at the test's working directory, so a test
+// that chdirs into a scratch tree gets tools confined to that tree rather than
+// to whatever repository the suite happens to be running inside.
+func testEnv(t *testing.T) tools.Env {
+	t.Helper()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	real, err := filepath.EvalSymlinks(wd)
+	if err != nil {
+		t.Fatalf("resolve %s: %v", wd, err)
+	}
+	return tools.Env{Root: real, Budgets: tools.DefaultBudgets()}
+}
 
 type fakeStepper struct {
 	prompts []string
@@ -60,7 +77,7 @@ func TestRunSendsEachLineToTheAgent(t *testing.T) {
 	bot := &fakeStepper{reply: "an answer"}
 	var out bytes.Buffer
 
-	run(context.Background(), replFor("first\n  second  \n"), &out, cfgFor("test-model"), "", bot, false)
+	run(context.Background(), replFor("first\n  second  \n"), &out, cfgFor("test-model"), "", testEnv(t), bot, false)
 
 	if len(bot.prompts) != 2 || bot.prompts[0] != "first" || bot.prompts[1] != "second" {
 		t.Fatalf("prompts = %q, want the trimmed input lines", bot.prompts)
@@ -77,7 +94,7 @@ func TestRunSkipsBlankLines(t *testing.T) {
 	bot := &fakeStepper{reply: "ok"}
 	var out bytes.Buffer
 
-	run(context.Background(), replFor("\n   \n\nreal\n"), &out, cfgFor("m"), "", bot, false)
+	run(context.Background(), replFor("\n   \n\nreal\n"), &out, cfgFor("m"), "", testEnv(t), bot, false)
 
 	if len(bot.prompts) != 1 || bot.prompts[0] != "real" {
 		t.Fatalf("prompts = %q, want blank lines ignored", bot.prompts)
@@ -90,7 +107,7 @@ func TestRunStopsOnExitCommands(t *testing.T) {
 			bot := &fakeStepper{reply: "ok"}
 			var out bytes.Buffer
 
-			run(context.Background(), replFor(cmd+"\nafter\n"), &out, cfgFor("m"), "", bot, false)
+			run(context.Background(), replFor(cmd+"\nafter\n"), &out, cfgFor("m"), "", testEnv(t), bot, false)
 
 			if len(bot.prompts) != 0 {
 				t.Fatalf("prompts = %q, want the loop to stop at %q", bot.prompts, cmd)
@@ -103,7 +120,7 @@ func TestRunStopsAtEOF(t *testing.T) {
 	bot := &fakeStepper{reply: "ok"}
 	var out bytes.Buffer
 
-	run(context.Background(), replFor("only\n"), &out, cfgFor("m"), "", bot, false)
+	run(context.Background(), replFor("only\n"), &out, cfgFor("m"), "", testEnv(t), bot, false)
 
 	if len(bot.prompts) != 1 {
 		t.Fatalf("prompts = %q, want a clean stop at EOF", bot.prompts)
@@ -114,7 +131,7 @@ func TestRunKeepsGoingAfterAnAgentError(t *testing.T) {
 	bot := &fakeStepper{err: errors.New("ollama unreachable")}
 	var out bytes.Buffer
 
-	run(context.Background(), replFor("one\ntwo\n"), &out, cfgFor("m"), "", bot, false)
+	run(context.Background(), replFor("one\ntwo\n"), &out, cfgFor("m"), "", testEnv(t), bot, false)
 
 	if len(bot.prompts) != 2 {
 		t.Fatalf("prompts = %q, want the REPL to survive the error", bot.prompts)
@@ -126,7 +143,7 @@ func TestRunKeepsGoingAfterAnAgentError(t *testing.T) {
 
 func TestRunShowsConfigPathWhenOneIsUsed(t *testing.T) {
 	var out bytes.Buffer
-	run(context.Background(), replFor("exit\n"), &out, cfgFor("m"), "/etc/metron.json", &fakeStepper{}, false)
+	run(context.Background(), replFor("exit\n"), &out, cfgFor("m"), "/etc/metron.json", testEnv(t), &fakeStepper{}, false)
 
 	if !strings.Contains(out.String(), "config: /etc/metron.json") {
 		t.Fatalf("output = %q, want the config path in the banner", out.String())
@@ -137,7 +154,7 @@ func TestRunWarnsAboutMissingDependencies(t *testing.T) {
 	t.Setenv("PATH", filepath.Join(t.TempDir(), "empty"))
 	var out bytes.Buffer
 
-	run(context.Background(), replFor("exit\n"), &out, cfgFor("m"), "", &fakeStepper{}, false)
+	run(context.Background(), replFor("exit\n"), &out, cfgFor("m"), "", testEnv(t), &fakeStepper{}, false)
 
 	for _, want := range []string{"rg not found", "ctags not found", "git not found"} {
 		if !strings.Contains(out.String(), want) {
@@ -150,7 +167,7 @@ func TestRunDoesNotSendCommandsToTheModel(t *testing.T) {
 	bot := &fakeStepper{reply: "ok"}
 	var out bytes.Buffer
 
-	run(context.Background(), replFor("/help\n/reset\n/nope\nreal question\n"), &out, cfgFor("m"), "", bot, false)
+	run(context.Background(), replFor("/help\n/reset\n/nope\nreal question\n"), &out, cfgFor("m"), "", testEnv(t), bot, false)
 
 	if len(bot.prompts) != 1 || bot.prompts[0] != "real question" {
 		t.Fatalf("prompts = %q, want only the non-command line forwarded", bot.prompts)
@@ -163,7 +180,7 @@ func TestRunDoesNotSendCommandsToTheModel(t *testing.T) {
 func TestCommandHelp(t *testing.T) {
 	var out bytes.Buffer
 
-	if quit := command(&out, "/help", config.Defaults(), "", &fakeStepper{}); quit {
+	if quit := command(&out, "/help", config.Defaults(), "", testEnv(t), &fakeStepper{}); quit {
 		t.Fatal("/help asked the REPL to quit")
 	}
 	for _, want := range []string{"/help", "/config", "/reset", "/tags", "/exit"} {
@@ -177,7 +194,7 @@ func TestCommandReset(t *testing.T) {
 	bot := &fakeStepper{}
 	var out bytes.Buffer
 
-	command(&out, "/reset", config.Defaults(), "", bot)
+	command(&out, "/reset", config.Defaults(), "", testEnv(t), bot)
 
 	if bot.resets != 1 {
 		t.Fatalf("resets = %d, want 1", bot.resets)
@@ -192,7 +209,7 @@ func TestCommandConfigPrintsEffectiveSettings(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Model = "printed-model"
 
-	command(&out, "/config", cfg, "/tmp/metron.json", &fakeStepper{})
+	command(&out, "/config", cfg, "/tmp/metron.json", testEnv(t), &fakeStepper{})
 
 	if !strings.Contains(out.String(), "source: /tmp/metron.json") {
 		t.Fatalf("output = %q, want the config source", out.String())
@@ -210,7 +227,7 @@ func TestCommandConfigPrintsEffectiveSettings(t *testing.T) {
 func TestCommandConfigWithoutAFile(t *testing.T) {
 	var out bytes.Buffer
 
-	command(&out, "/config", config.Defaults(), "", &fakeStepper{})
+	command(&out, "/config", config.Defaults(), "", testEnv(t), &fakeStepper{})
 
 	if !strings.Contains(out.String(), "built-in defaults") {
 		t.Fatalf("output = %q, want the defaults noted as the source", out.String())
@@ -234,7 +251,7 @@ func TestCommandTagsRebuildsIndex(t *testing.T) {
 	t.Setenv("PATH", bin)
 
 	var out bytes.Buffer
-	command(&out, "/tags", config.Defaults(), "", &fakeStepper{})
+	command(&out, "/tags", config.Defaults(), "", testEnv(t), &fakeStepper{})
 
 	if !strings.Contains(out.String(), "rebuilt") {
 		t.Fatalf("output = %q, want a rebuild confirmation", out.String())
@@ -250,7 +267,7 @@ func TestCommandTagsReportsFailure(t *testing.T) {
 	t.Setenv("PATH", filepath.Join(t.TempDir(), "empty"))
 
 	var out bytes.Buffer
-	command(&out, "/tags", config.Defaults(), "", &fakeStepper{})
+	command(&out, "/tags", config.Defaults(), "", testEnv(t), &fakeStepper{})
 
 	if !strings.Contains(out.String(), "Error:") {
 		t.Fatalf("output = %q, want the rebuild failure reported", out.String())
@@ -260,7 +277,7 @@ func TestCommandTagsReportsFailure(t *testing.T) {
 func TestCommandUnknownSlashCommand(t *testing.T) {
 	var out bytes.Buffer
 
-	command(&out, "/bogus", config.Defaults(), "", &fakeStepper{})
+	command(&out, "/bogus", config.Defaults(), "", testEnv(t), &fakeStepper{})
 
 	if !strings.Contains(out.String(), "Unknown command") {
 		t.Fatalf("output = %q, want an unknown-command notice", out.String())
@@ -270,7 +287,7 @@ func TestCommandUnknownSlashCommand(t *testing.T) {
 func TestCommandIgnoresPlainInput(t *testing.T) {
 	var out bytes.Buffer
 
-	if quit := command(&out, "explain the loop", config.Defaults(), "", &fakeStepper{}); quit {
+	if quit := command(&out, "explain the loop", config.Defaults(), "", testEnv(t), &fakeStepper{}); quit {
 		t.Fatal("plain input asked the REPL to quit")
 	}
 	if out.String() != "" {
@@ -392,7 +409,7 @@ func TestCommandHistoryReportsTheBudget(t *testing.T) {
 	cfg := cfgFor("m")
 	cfg.MaxHistoryMessages = 60
 
-	command(&out, "/history", cfg, "", bot)
+	command(&out, "/history", cfg, "", testEnv(t), bot)
 
 	for _, want := range []string{"12 messages", "3400 bytes", "budget: 60"} {
 		if !strings.Contains(out.String(), want) {
@@ -461,7 +478,7 @@ func TestRunReportsACancelledTurnAndKeepsGoing(t *testing.T) {
 	var out bytes.Buffer
 	bot := &fakeStepper{err: context.Canceled}
 
-	run(context.Background(), replFor("first\nsecond\n"), &out, cfgFor("m"), "", bot, false)
+	run(context.Background(), replFor("first\nsecond\n"), &out, cfgFor("m"), "", testEnv(t), bot, false)
 
 	if !strings.Contains(out.String(), "cancelled") {
 		t.Fatalf("output = %q, want the cancellation reported", out.String())
@@ -613,7 +630,7 @@ func TestRunReportsTokenUsage(t *testing.T) {
 	var out bytes.Buffer
 	bot := &fakeStepper{reply: "ok", usage: ollama.Usage{PromptTokens: 1240, GenTokens: 89}, calls: 3}
 
-	run(context.Background(), replFor("hi\n"), &out, cfgFor("m"), "", bot, false)
+	run(context.Background(), replFor("hi\n"), &out, cfgFor("m"), "", testEnv(t), bot, false)
 
 	for _, want := range []string{"1240 prompt", "89 generated", "3 tool calls"} {
 		if !strings.Contains(out.String(), want) {
@@ -626,7 +643,7 @@ func TestRunStaysQuietWhenTheServerReportsNoCounts(t *testing.T) {
 	var out bytes.Buffer
 	bot := &fakeStepper{reply: "ok"}
 
-	run(context.Background(), replFor("hi\n"), &out, cfgFor("m"), "", bot, false)
+	run(context.Background(), replFor("hi\n"), &out, cfgFor("m"), "", testEnv(t), bot, false)
 
 	if strings.Contains(out.String(), "tool calls") {
 		t.Fatalf("output = %q, want no usage line when there is nothing to report", out.String())
@@ -639,7 +656,7 @@ func TestRunWarnsWhenThePromptCrowdsTheContextWindow(t *testing.T) {
 	cfg.NumCtx = 1000
 	bot := &fakeStepper{reply: "ok", usage: ollama.Usage{PromptTokens: 900, GenTokens: 10}}
 
-	run(context.Background(), replFor("hi\n"), &out, cfg, "", bot, false)
+	run(context.Background(), replFor("hi\n"), &out, cfg, "", testEnv(t), bot, false)
 
 	if !strings.Contains(out.String(), "900 of 1000 context tokens") {
 		t.Fatalf("output = %q, want the context-pressure warning", out.String())
@@ -652,7 +669,7 @@ func TestRunDoesNotWarnBelowTheContextThreshold(t *testing.T) {
 	cfg.NumCtx = 1000
 	bot := &fakeStepper{reply: "ok", usage: ollama.Usage{PromptTokens: 100, GenTokens: 10}}
 
-	run(context.Background(), replFor("hi\n"), &out, cfg, "", bot, false)
+	run(context.Background(), replFor("hi\n"), &out, cfg, "", testEnv(t), bot, false)
 
 	// Startup dependency warnings are unrelated; only the context one matters.
 	if strings.Contains(out.String(), "context tokens") {
@@ -850,7 +867,7 @@ func TestRunDoesNotReprintAStreamedReply(t *testing.T) {
 	var out bytes.Buffer
 	bot := &fakeStepper{reply: "already streamed"}
 
-	run(context.Background(), replFor("hi\n"), &out, cfgFor("m"), "", bot, true)
+	run(context.Background(), replFor("hi\n"), &out, cfgFor("m"), "", testEnv(t), bot, true)
 
 	// The client's sink wrote the text; run must not write it again.
 	if strings.Contains(out.String(), "already streamed") {

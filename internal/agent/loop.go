@@ -11,16 +11,16 @@ import (
 	"github.com/mdabydeen/metron/internal/tools"
 )
 
-// Options bounds the agent loop and the tool budgets it enforces.
+// Options bounds the agent loop and carries the environment the tools run in.
 type Options struct {
 	MaxTurns           int // model round-trips allowed per Step
 	CompactThreshold   int // tool output size, in bytes, above which slices are purged
 	MaxHistoryMessages int // messages retained after a turn, excluding the system prompt
-	MaxSliceLines      int // widest span view_slice will read
-	MaxLineChars       int // longest single line view_slice will emit
-	SearchMaxMatches   int // total ripgrep matches
-	SearchMaxPerFile   int // ripgrep matches per file
-	ListMaxEntries     int // paths list_files will return
+
+	// Env is the project the tools operate on: the root they are confined to
+	// and the budgets they enforce. A zero Root is resolved at New, so a caller
+	// that only cares about the loop can leave it alone.
+	Env tools.Env
 
 	// Progress receives one "[executing: tool]" line per dispatched call. A nil
 	// writer discards them, so the loop stays usable as a library.
@@ -32,17 +32,14 @@ type Options struct {
 	Approve func(diff string) bool
 }
 
-// DefaultOptions matches metron's built-in configuration.
+// DefaultOptions matches metron's built-in configuration. The tool environment
+// is left unrooted; New resolves it against the current project.
 func DefaultOptions() Options {
 	return Options{
 		MaxTurns:           10,
 		CompactThreshold:   400,
 		MaxHistoryMessages: 60,
-		MaxSliceLines:      120,
-		MaxLineChars:       500,
-		SearchMaxMatches:   10,
-		SearchMaxPerFile:   2,
-		ListMaxEntries:     60,
+		Env:                tools.Env{Budgets: tools.DefaultBudgets()},
 	}
 }
 
@@ -72,6 +69,12 @@ Strict Behavioral Directives:
 7. Once the patch is applied, report what changed concisely. No chatty introductions.`
 
 func New(client Chatter, opts Options) *Agent {
+	// Resolving here rather than in DefaultOptions keeps that function pure and
+	// means the root is found once, when the agent is built, instead of on
+	// every tool call.
+	if opts.Env.Root == "" {
+		opts.Env = tools.NewEnv(opts.Env.Budgets)
+	}
 	return &Agent{
 		client:   client,
 		opts:     opts,
@@ -201,21 +204,21 @@ func (a *Agent) dispatch(call ollama.ToolCall) string {
 	switch name {
 	case "list_files":
 		pat, _ := args["pattern"].(string)
-		res, err := tools.ListFiles(pat, a.opts.ListMaxEntries)
+		res, err := a.opts.Env.ListFiles(pat)
 		if err != nil {
 			return fmt.Sprintf("Error: %v", err)
 		}
 		return res
 	case "find_symbol":
 		sym, _ := args["symbol"].(string)
-		res, err := tools.FindSymbol(sym)
+		res, err := a.opts.Env.FindSymbol(sym)
 		if err != nil {
 			return fmt.Sprintf("Error: %v", err)
 		}
 		return res
 	case "search_text":
 		pat, _ := args["pattern"].(string)
-		res, err := tools.SearchText(pat, a.opts.SearchMaxMatches, a.opts.SearchMaxPerFile)
+		res, err := a.opts.Env.SearchText(pat)
 		if err != nil {
 			return fmt.Sprintf("Error: %v", err)
 		}
@@ -224,7 +227,7 @@ func (a *Agent) dispatch(call ollama.ToolCall) string {
 		path, _ := args["path"].(string)
 		start := toInt(args["start"])
 		end := toInt(args["end"])
-		res, err := tools.ViewSlice(path, start, end, a.opts.MaxSliceLines, a.opts.MaxLineChars)
+		res, err := a.opts.Env.ViewSlice(path, start, end)
 		if err != nil {
 			return fmt.Sprintf("Error: %v", err)
 		}
@@ -236,7 +239,7 @@ func (a *Agent) dispatch(call ollama.ToolCall) string {
 			// act on beats an error it will retry until the turn budget is gone.
 			return "Patch rejected by the operator. Do not retry; describe the change instead."
 		}
-		res, err := tools.ApplyPatch(diff)
+		res, err := a.opts.Env.ApplyPatch(diff)
 		if err != nil {
 			return fmt.Sprintf("Error: %v", err)
 		}

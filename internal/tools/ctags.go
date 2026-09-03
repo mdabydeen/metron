@@ -5,14 +5,26 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
-func EnsureTags() error {
-	if _, err := os.Stat(".tags"); err == nil {
+// tagsFile is the symbol index, written at the project root rather than in the
+// working directory, so running metron from a subdirectory does not scatter
+// index files around the tree.
+func (e Env) tagsFile() string {
+	return filepath.Join(e.Root, ".tags")
+}
+
+// EnsureTags builds the ctags index if it is not already there. It is built
+// once per project and never invalidated automatically; /tags rebuilds it.
+func (e Env) EnsureTags() error {
+	if _, err := os.Stat(e.tagsFile()); err == nil {
 		return nil
 	}
-	cmd := exec.Command("ctags", "-R", "--fields=+nK", "--exclude=.git", "--exclude=vendor", "-f", ".tags", ".")
+	cmd := exec.Command("ctags", "-R", "--fields=+nK", "--exclude=.git", "--exclude=vendor",
+		"-f", e.tagsFile(), ".")
+	cmd.Dir = e.Root
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		return nil
@@ -25,12 +37,13 @@ func EnsureTags() error {
 	return fmt.Errorf("ctags failed (is this Universal Ctags?): %v: %s", err, strings.TrimSpace(string(out)))
 }
 
-func FindSymbol(symbol string) (string, error) {
-	if err := EnsureTags(); err != nil {
+// FindSymbol reports where a symbol is defined, by exact name.
+func (e Env) FindSymbol(symbol string) (string, error) {
+	if err := e.EnsureTags(); err != nil {
 		return "", fmt.Errorf("failed generating ctags: %w", err)
 	}
 
-	f, err := os.Open(".tags")
+	f, err := os.Open(e.tagsFile())
 	if err != nil {
 		return "", err
 	}

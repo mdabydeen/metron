@@ -17,11 +17,25 @@ is pre-1.0, the minor version is bumped for breaking changes to configuration or
   Homebrew tap.
 - CI enforces the project's two standing invariants: 100% statement coverage, and a
   hermetic default test suite.
+- Tools are confined to the project directory. Every path is resolved against the enclosing
+  git work tree (or the working directory outside one) and refused if it lands outside,
+  symlinks included, for files being created as well as read.
+- metron can be started from any subdirectory of a project. Tools act on the project root
+  rather than the process working directory, and `.tags` is written there.
 
 ### Changed
 
 - `main.go` moved to `cmd/metron/main.go`. Build with `go build ./cmd/metron` rather than
   `go build main.go`; `make build` is unchanged.
+- `agent.Options` carries a `tools.Env` — the project root plus the tool budgets — in place
+  of its five separate budget fields. The tools are methods on that `Env`.
+
+### Fixed
+
+- `search_text` no longer lets a pattern beginning with a dash be parsed by ripgrep as a
+  flag. A search for `--files` listed every file in the repository and applied no match
+  budget at all; the pattern now follows a `--` separator. `list_files` passes its glob as
+  `--glob=<pattern>` for the same reason.
 
 ## [0.1.0] — unreleased
 

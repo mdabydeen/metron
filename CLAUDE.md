@@ -39,7 +39,8 @@ Single-binary CLI with three layers:
 - **`internal/ollama`** — thin HTTP client (`Client.Chat`) for Ollama's chat API. Defines the wire types (`Message`, `ToolCall`, `Tool`, `ChatRequest`/`ChatResponse`) shared between the agent and the model.
 - **`internal/config`** — settings: `Defaults()`, a JSON file, then environment overrides, then `Validate()`. Resolution order is defaults < file < env; a file that exists but is unreadable, malformed, or has an unknown key is a startup error, never a silent fallback. Every tunable that used to be a magic number lives here.
 - **`internal/agent`** — the agent loop (`Agent.Step`) and the system prompt that establishes the tool-only-access-to-code contract. Owns the persistent `[]ollama.Message` history across turns. `New` takes a `Chatter` interface (the one-method subset of `*ollama.Client`) so the loop can be driven by a fake in tests.
-- **`internal/tools`** — the four tools exposed to the model, each a standalone package function with no shared state:
+- **`internal/tools`** — the five tools exposed to the model, plus the environment they run in:
+  - `env.go`: `Env` — the project `Root` every path is resolved against and the `Budgets` every tool enforces. The tools are methods on it rather than free functions: `Root` has to reach all of them, and threading five budget parameters through each call had already stopped scaling. State is passed in, never global, so a caller can drive the tools against a scratch tree without touching process state. `resolve` rejects any path that escapes `Root` *after* following symlinks — checking before would refuse legitimate paths, since on macOS `/var` is a symlink to `/private/var`.
   - `ctags.go`: `FindSymbol` — lazily builds `.tags` via `ctags -R` (skipped if `.tags` already exists) and greps it for exact symbol matches.
   - `search.go`: `SearchText` — `rg -n --max-count=<per-file>`, with the overall match count capped in Go afterwards. Do not try to push the total budget into ripgrep: `-m` and `--max-count` are the same flag and it is per-file, which is why the original `--max-count=2 -m 10` silently enforced nothing.
   - `slice.go`: `ViewSlice` — reads a line range from one file, capped at `max_slice_lines`, output prefixed with `%5d | ` line numbers.
@@ -57,7 +58,9 @@ Single-binary CLI with three layers:
 
 ### Adding a new tool
 
-Add the implementation to `internal/tools`, add its JSON schema to the package-level `toolDefs` slice, and add a case in `dispatch`. Then extend `TestDispatchRoutesToolsAndReportsErrors` and `TestStepAdvertisesAllFourTools`. Keep new tools narrow and output-bounded — that constraint is the whole point of this codebase.
+Add the implementation to `internal/tools` as a method on `Env`, taking its budget from `Env.Budgets` and routing every path through `Env.resolve`. Add the budget to `tools.Budgets`, `config.Config`, `config.Defaults()` and `Config.Validate()`. Add its JSON schema to the package-level `toolDefs` slice and a case in `dispatch`. Then extend `TestDispatchRoutesToolsAndReportsErrors` and the tool-advertisement test. Keep new tools narrow and output-bounded — that constraint is the whole point of this codebase.
+
+Shelling out: build the argument vector explicitly and never through a shell. Where a model-supplied string is a positional argument, put `--` before it (`search.go`) or pass it as `--flag=value` (`list.go`); without that, a pattern starting with a dash is parsed as a flag and silently changes what the tool does. Set `cmd.Dir = e.Root` so the tool acts on the project rather than on whatever the process working directory happens to be.
 
 ## Testing
 
