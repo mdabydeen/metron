@@ -301,3 +301,35 @@ func TestValidateAcceptsEveryKnownTool(t *testing.T) {
 		t.Fatalf("Validate() = %v, want every known tool name accepted", err)
 	}
 }
+
+func TestValidateRejectsABlankAllowedCommand(t *testing.T) {
+	cfg := Defaults()
+	cfg.AllowedCommands = []string{"go test", "  "}
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() = nil, want a blank allowed_commands entry rejected")
+	}
+	// A blank entry parses to a zero-length prefix, which every argv begins
+	// with -- so the typo would permit everything rather than nothing.
+	if !strings.Contains(err.Error(), "allowed_commands[1]") {
+		t.Fatalf("Validate() error = %v, want it to name the offending entry", err)
+	}
+}
+
+func TestValidateRejectsNonPositiveCommandBudgets(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		apply func(*Config)
+	}{
+		{"command_timeout_seconds", func(c *Config) { c.CommandTimeoutSeconds = 0 }},
+		{"max_command_output_bytes", func(c *Config) { c.MaxCommandOutputBytes = -1 }},
+	} {
+		cfg := Defaults()
+		tc.apply(&cfg)
+		err := cfg.Validate()
+		if err == nil || !strings.Contains(err.Error(), tc.name) {
+			t.Errorf("Validate() error = %v, want %s rejected", err, tc.name)
+		}
+	}
+}

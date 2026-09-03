@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"unicode/utf8"
 )
 
 // testEnv returns an Env rooted at the test's working directory. Root is taken
@@ -65,3 +66,13 @@ func writeFile(t *testing.T, path, content string) {
 		t.Fatalf("write %s: %v", path, err)
 	}
 }
+
+// fileExists is a small helper for tests asserting that something was *not*
+// created.
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// utf8ValidString is re-exported for tests so they do not each import unicode/utf8.
+func utf8ValidString(s string) bool { return utf8.ValidString(s) }

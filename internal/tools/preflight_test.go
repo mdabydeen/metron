@@ -208,7 +208,12 @@ func TestUnavailableToolsIsEmptyWhenEverythingIsPresent(t *testing.T) {
 		"ctags": universalCtagsShim,
 	})
 
-	if got := defaultEnv(t).UnavailableTools(); len(got) != 0 {
+	env := defaultEnv(t)
+	// run_command needs permission rather than a binary, so it is only
+	// available once the operator has allowed something.
+	env.Allowed = ParseAllowlist([]string{"go test"})
+
+	if got := env.UnavailableTools(); len(got) != 0 {
 		t.Fatalf("UnavailableTools() = %v, want nothing unavailable", got)
 	}
 }

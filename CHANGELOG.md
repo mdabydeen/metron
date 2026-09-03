@@ -27,6 +27,15 @@ is pre-1.0, the minor version is bumped for breaking changes to configuration or
   a git repository withdraws `apply_patch`. Their schemas are then not sent at all, and the
   system prompt stops naming them — on a stock Mac that is ~164 fewer prompt tokens on every
   request. A call to an unadvertised tool is refused before it runs.
+- `run_command` runs one permitted command in the project and returns its exit status and
+  output, so the agent can check its own edit rather than assert it worked. It is off by
+  default: with no `allowed_commands` set the tool is not advertised and its schema is not
+  sent. There is no shell -- the command is split on whitespace and executed directly, so
+  shell metacharacters are inert -- the allowlist matches whole argv tokens, each run is
+  approved at the prompt, and the whole process group is killed at the timeout so a spawned
+  test binary cannot outlive it. Output is clipped keeping both ends.
+- `Approve` now takes the kind of effect as well as the preview, so the prompt can ask
+  "Run this command?" rather than "Apply this patch?" for something that is not a patch.
 - `disabled_tools` withholds tools by name. An unknown name is a startup error, since a typo
   would otherwise leave the tool enabled.
 - `/config` reports the advertised tool set and the size of its schemas, because that cost is

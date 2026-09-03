@@ -32,10 +32,14 @@ type Options struct {
 	// writer discards them, so the loop stays usable as a library.
 	Progress io.Writer
 
-	// Approve is consulted with the diff before apply_patch touches the working
-	// tree. A nil approver applies without asking, which is the behaviour every
+	// Approve is consulted before any tool causes an effect: apply_patch
+	// touching the working tree, run_command executing anything. kind names
+	// what is being asked ("patch", "command") so the caller can render the
+	// preview appropriately; preview is the diff or the command line.
+	//
+	// A nil approver proceeds without asking, which is the behaviour every
 	// non-interactive caller wants.
-	Approve func(diff string) bool
+	Approve func(kind, preview string) bool
 }
 
 // DefaultOptions matches metron's built-in configuration. The tool environment
@@ -89,6 +93,7 @@ var toolDirectives = map[string]string{
 	tools.ToolSearchText: "Use 'search_text' for text patterns.",
 	tools.ToolViewSlice:  "Use 'view_slice' to view at most 20-60 relevant lines.",
 	tools.ToolApplyPatch: "Use 'apply_patch' with a valid git unified diff (--- a/... +++ b/...) to execute changes.",
+	tools.ToolRunCommand: "Use 'run_command' to check your work; only the operator's allowed commands will run.",
 }
 
 // systemPrompt renders the directives for exactly the tools being advertised,
@@ -109,14 +114,14 @@ func New(client Chatter, opts Options) *Agent {
 	// Resolving here rather than in DefaultOptions keeps that function pure and
 	// means the root is found once, when the agent is built, instead of on
 	// every tool call.
-	if opts.Env.Root == "" {
-		opts.Env = tools.NewEnv(opts.Env.Budgets)
-	}
+	// Rooted rather than NewEnv: replacing the whole Env would discard whatever
+	// else the caller configured on it, the command allowlist included.
+	opts.Env = opts.Env.Rooted()
 	unavailable := opts.Env.UnavailableTools()
 	advertised := advertise(unavailable, opts.DisabledTools)
 	schemas := make([]ollama.Tool, 0, len(advertised))
 	for _, name := range advertised {
-		schemas = append(schemas, toolDefs[name])
+		schemas = append(schemas, describeTool(name, opts.Env))
 	}
 	return &Agent{
 		client:      client,
@@ -126,6 +131,29 @@ func New(client Chatter, opts Options) *Agent {
 		unavailable: unavailable,
 		messages:    []ollama.Message{{Role: "system", Content: systemPrompt(advertised)}},
 	}
+}
+
+// describeTool returns a tool's schema, specialised to this project where the
+// static description is not enough. run_command is the case that matters: a
+// model told only that "permitted commands" exist will guess, and every guess
+// costs a turn, so the allowlist itself goes into the description.
+func describeTool(name string, env tools.Env) ollama.Tool {
+	def := toolDefs[name]
+	if name != tools.ToolRunCommand {
+		return def
+	}
+	fn, ok := def.Function.(map[string]any)
+	if !ok {
+		return def
+	}
+	// Copy before writing: toolDefs is package state shared by every agent.
+	clone := make(map[string]any, len(fn))
+	for k, v := range fn {
+		clone[k] = v
+	}
+	clone["description"] = fmt.Sprintf("%s %s", fn["description"], env.AllowedPhrase())
+	def.Function = clone
+	return def
 }
 
 // advertise returns the tools worth sending: everything metron implements, less
@@ -220,6 +248,22 @@ var toolDefs = map[string]ollama.Tool{
 			},
 		},
 	},
+	tools.ToolRunCommand: {
+		Type: "function",
+		Function: map[string]any{
+			"name": "run_command",
+			"description": "Run one permitted command in the project and return its exit status and output. " +
+				"There is no shell: the command is split on whitespace and executed directly, so pipes, " +
+				"redirection, globs, quotes and ; && || are not interpreted.",
+			"parameters": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"command": map[string]any{"type": "string"},
+				},
+				"required": []string{"command"},
+			},
+		},
+	},
 	tools.ToolApplyPatch: {
 		Type: "function",
 		Function: map[string]any{
@@ -257,7 +301,7 @@ func (a *Agent) Step(ctx context.Context, userPrompt string) (string, error) {
 
 		a.lastCalls += len(resp.ToolCalls)
 		for _, call := range resp.ToolCalls {
-			out := a.dispatch(call)
+			out := a.dispatch(ctx, call)
 			a.messages = append(a.messages, ollama.Message{
 				Role:     "tool",
 				ToolName: call.Function.Name,
@@ -269,7 +313,7 @@ func (a *Agent) Step(ctx context.Context, userPrompt string) (string, error) {
 	return "", fmt.Errorf("max turns exceeded")
 }
 
-func (a *Agent) dispatch(call ollama.ToolCall) string {
+func (a *Agent) dispatch(ctx context.Context, call ollama.ToolCall) string {
 	name := call.Function.Name
 	args := call.Function.Arguments
 
@@ -316,7 +360,7 @@ func (a *Agent) dispatch(call ollama.ToolCall) string {
 		return res
 	case "apply_patch":
 		diff, _ := args["diff"].(string)
-		if a.opts.Approve != nil && !a.opts.Approve(diff) {
+		if a.opts.Approve != nil && !a.opts.Approve("patch", diff) {
 			// Phrased at the model, like tools.missingBinary: a refusal it can
 			// act on beats an error it will retry until the turn budget is gone.
 			return "Patch rejected by the operator. Do not retry; describe the change instead."
@@ -326,6 +370,16 @@ func (a *Agent) dispatch(call ollama.ToolCall) string {
 			return fmt.Sprintf("Error: %v", err)
 		}
 		return res
+	case "run_command":
+		command, _ := args["command"].(string)
+		if a.opts.Approve != nil && !a.opts.Approve("command", command) {
+			return "Command rejected by the operator. Do not retry; " +
+				"describe what you would run and why instead."
+		}
+		// No error branch: RunCommand reports every outcome as text, because a
+		// refusal, a timeout and a failing test are all things the model should
+		// read rather than things that went wrong with metron.
+		return a.opts.Env.RunCommand(ctx, command)
 	default:
 		return fmt.Sprintf("Unknown tool %s", name)
 	}

@@ -130,7 +130,11 @@ func runMain(args []string, in io.Reader, out, errOut io.Writer) int {
 		SearchMaxMatches: cfg.SearchMaxMatches,
 		SearchMaxPerFile: cfg.SearchMaxPerFile,
 		ListMaxEntries:   cfg.ListMaxEntries,
+
+		CommandTimeout:        time.Duration(cfg.CommandTimeoutSeconds) * time.Second,
+		MaxCommandOutputBytes: cfg.MaxCommandOutputBytes,
 	})
+	env.Allowed = tools.ParseAllowlist(cfg.AllowedCommands)
 	opts := agent.Options{
 		MaxTurns:           cfg.MaxTurns,
 		CompactThreshold:   cfg.CompactThreshold,
@@ -146,10 +150,10 @@ func runMain(args []string, in io.Reader, out, errOut io.Writer) int {
 	case f.prompt != "":
 		// Nobody is at the keyboard to answer, so fail closed rather than
 		// block forever or edit the tree unattended.
-		opts.Approve = func(string) bool { return false }
+		opts.Approve = func(string, string) bool { return false }
 		opts.Progress = errOut
 	default:
-		opts.Approve = func(diff string) bool { return approve(out, scanner, diff) }
+		opts.Approve = func(kind, preview string) bool { return approve(out, scanner, kind, preview) }
 	}
 	bot := agent.New(client, opts)
 
@@ -180,21 +184,34 @@ func oneShot(ctx context.Context, out, errOut io.Writer, env tools.Env, bot step
 // default of 64KB silently ends the session on anything larger.
 const maxInputLine = 1 << 20
 
-// approve shows the model's diff and waits for a yes. It reads from the REPL's
-// own scanner, so a queued line is consumed here rather than being mistaken for
-// the next request. EOF answers no: an operator who is gone has not consented.
-func approve(out io.Writer, scanner *bufio.Scanner, diff string) bool {
-	fmt.Fprintf(out, "\n\033[1mProposed patch:\033[0m\n%s\n", strings.TrimRight(diff, "\n"))
-	fmt.Fprint(out, "\033[1;33mApply this patch? [y/N] \033[0m")
+// approvalWording is what the prompt says for each kind of effect. A command is
+// not a patch: the operator is being asked to let something execute, not to
+// accept an edit, and the prompt should not blur the two.
+var approvalWording = map[string]struct{ heading, question, refusal string }{
+	"patch":   {"Proposed patch", "Apply this patch?", "Patch not applied."},
+	"command": {"Proposed command", "Run this command?", "Command not run."},
+}
+
+// approve shows what the model wants to do and waits for a yes. It reads from
+// the REPL's own scanner, so a queued line is consumed here rather than being
+// mistaken for the next request. EOF answers no: an operator who is gone has
+// not consented.
+func approve(out io.Writer, scanner *bufio.Scanner, kind, preview string) bool {
+	w, ok := approvalWording[kind]
+	if !ok {
+		w = struct{ heading, question, refusal string }{"Proposed action", "Allow this?", "Not allowed."}
+	}
+	fmt.Fprintf(out, "\n\033[1m%s:\033[0m\n%s\n", w.heading, strings.TrimRight(preview, "\n"))
+	fmt.Fprintf(out, "\033[1;33m%s [y/N] \033[0m", w.question)
 	if !scanner.Scan() {
-		fmt.Fprintln(out, "\nNo input; patch not applied.")
+		fmt.Fprintf(out, "\nNo input; %s\n", strings.ToLower(w.refusal))
 		return false
 	}
 	switch strings.ToLower(strings.TrimSpace(scanner.Text())) {
 	case "y", "yes":
 		return true
 	default:
-		fmt.Fprintln(out, "Patch not applied.")
+		fmt.Fprintln(out, w.refusal)
 		return false
 	}
 }

@@ -51,6 +51,15 @@ type Config struct {
 	// on the turns that would have used them.
 	DisabledTools []string `json:"disabled_tools"`
 
+	// AllowedCommands is what run_command may execute, as argv prefixes:
+	// "go test" permits `go test ./...` but not `go tool`. Empty -- the default
+	// -- withdraws the tool entirely, so letting a model run anything at all is
+	// a decision an operator makes rather than one they forget to unmake.
+	AllowedCommands []string `json:"allowed_commands"`
+
+	CommandTimeoutSeconds int `json:"command_timeout_seconds"`
+	MaxCommandOutputBytes int `json:"max_command_output_bytes"`
+
 	// Safety
 	AutoApprovePatches bool `json:"auto_approve_patches"`
 }
@@ -74,6 +83,11 @@ func Defaults() Config {
 		SearchMaxPerFile:   2,
 		ListMaxEntries:     60,
 		DisabledTools:      []string{},
+
+		AllowedCommands:       []string{},
+		CommandTimeoutSeconds: 120,
+		MaxCommandOutputBytes: 4000,
+
 		AutoApprovePatches: false,
 	}
 }
@@ -166,6 +180,8 @@ func (c Config) Validate() error {
 		{"search_max_matches", c.SearchMaxMatches},
 		{"search_max_per_file", c.SearchMaxPerFile},
 		{"list_max_entries", c.ListMaxEntries},
+		{"command_timeout_seconds", c.CommandTimeoutSeconds},
+		{"max_command_output_bytes", c.MaxCommandOutputBytes},
 	} {
 		if check.val <= 0 {
 			problems = append(problems, fmt.Sprintf("%s must be > 0 (got %d)", check.name, check.val))
@@ -183,6 +199,13 @@ func (c Config) Validate() error {
 		if !slices.Contains(tools.ToolNames, name) {
 			problems = append(problems, fmt.Sprintf("disabled_tools: unknown tool %q (known: %s)",
 				name, strings.Join(tools.ToolNames, ", ")))
+		}
+	}
+	// A blank entry would match every argv prefix of length zero -- that is, all
+	// of them -- turning a typo into "run anything".
+	for i, cmd := range c.AllowedCommands {
+		if strings.TrimSpace(cmd) == "" {
+			problems = append(problems, fmt.Sprintf("allowed_commands[%d] must not be empty", i))
 		}
 	}
 	if len(problems) > 0 {

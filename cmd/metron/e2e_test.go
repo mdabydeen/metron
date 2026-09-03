@@ -16,6 +16,7 @@ import (
 	"github.com/mdabydeen/metron/internal/agent"
 	"github.com/mdabydeen/metron/internal/config"
 	"github.com/mdabydeen/metron/internal/ollama"
+	"github.com/mdabydeen/metron/internal/tools"
 )
 
 // TestEndToEndPatchSession wires the real HTTP client, agent loop and tools
@@ -135,4 +136,77 @@ func mustJSON(t *testing.T, v any) string {
 		t.Fatal(err)
 	}
 	return string(b)
+}
+
+// TestEndToEndRunCommandSession drives the real client, agent and tools through
+// a session that edits a file and then runs a command to check the edit --
+// the loop metron could not close before run_command existed.
+func TestEndToEndRunCommandSession(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := os.WriteFile("answer.txt", []byte("41\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"init", "-q"}, {"config", "user.email", "t@e.com"}, {"config", "user.name", "t"},
+		{"add", "answer.txt"}, {"-c", "commit.gpgsign=false", "commit", "-qm", "init"},
+	} {
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+
+	diff := "--- a/answer.txt\n+++ b/answer.txt\n@@ -1 +1 @@\n-41\n+42\n"
+	script := []string{
+		`{"message":{"role":"assistant","tool_calls":[{"function":{"name":"apply_patch","arguments":` +
+			mustJSON(t, map[string]any{"diff": diff}) + `}}]},"done":true}`,
+		`{"message":{"role":"assistant","tool_calls":[{"function":{"name":"run_command","arguments":` +
+			mustJSON(t, map[string]any{"command": "cat answer.txt"}) + `}}]},"done":true}`,
+		`{"message":{"role":"assistant","content":"answer.txt now reads 42."},"done":true}`,
+	}
+	var turn int
+	var toolResults []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req ollama.ChatRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		for _, m := range req.Messages {
+			if m.Role == "tool" {
+				toolResults = append(toolResults, m.Content)
+			}
+		}
+		if turn >= len(script) {
+			t.Errorf("model called %d times, script has %d", turn+1, len(script))
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write([]byte(script[turn]))
+		turn++
+	}))
+	defer srv.Close()
+
+	env := tools.NewEnv(tools.DefaultBudgets())
+	env.Allowed = tools.ParseAllowlist([]string{"cat"})
+	opts := agent.DefaultOptions()
+	opts.Env = env
+	bot := agent.New(ollama.NewClient(srv.URL+"/api/chat", "m", ollama.DefaultOptions()), opts)
+
+	var out bytes.Buffer
+	cfg := config.Defaults()
+	run(context.Background(), bufio.NewScanner(strings.NewReader("fix the answer\nexit\n")),
+		&out, cfg, "", env, bot, false)
+
+	if turn != len(script) {
+		t.Fatalf("model called %d times, want %d", turn, len(script))
+	}
+	joined := strings.Join(toolResults, "\n")
+	if !strings.Contains(joined, "successfully applied") {
+		t.Fatalf("tool results %q missing the patch result", joined)
+	}
+	// The point of the whole PR: the agent saw the effect of its own edit.
+	if !strings.Contains(joined, "exit status 0") || !strings.Contains(joined, "42") {
+		t.Fatalf("tool results %q missing the verified command output", joined)
+	}
 }

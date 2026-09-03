@@ -31,6 +31,9 @@ it means the threat model is unusual.
   unwanted is one `git checkout` away.
 - `-p/--prompt` without `--yes` fails closed: nobody is at the keyboard to approve, so
   patches are refused rather than applied unattended.
+- `run_command` executes commands in your project. It is **off by default**: with no
+  `allowed_commands` set, the tool is not offered to the model at all and its schema is
+  not even sent. Turning it on is a deliberate act.
 
 **Confinement.** Every path a tool touches is resolved against the project root
 -- the enclosing git work tree, or the working directory if there is none -- and
@@ -46,6 +49,30 @@ out of the tree, and treats a leading `/` as relative to the tree rather than to
 the filesystem. metron checks anyway, so the boundary is stated in metron's own
 terms and survives a future flag or backend that loosens git's.
 
+**Running commands.** `run_command` is the only tool that can cause an effect
+metron cannot describe in advance, so it is bounded four ways:
+
+- **There is no shell.** The command is split on whitespace and executed
+  directly. `;`, `&&`, `|`, redirection and globs are never interpreted -- they
+  arrive as literal arguments and the program rejects them. This is the security
+  property the design rests on: not a blocklist of dangerous characters, but
+  never handing the string to anything that would interpret them.
+- **An allowlist decides what may run at all**, matched on whole argv tokens.
+  `"go test"` permits `go test ./...` and refuses `go tool`, `gotcha test`,
+  `go --work test` and `env go test`. Matching per element rather than over the
+  joined string is what makes it hard to talk around.
+- **You are asked before it runs**, with the same prompt apply_patch uses, and
+  the same fail-closed behaviour on end-of-input.
+- **It is bounded in time and output.** The command runs in its own process
+  group and the whole group is killed at `command_timeout_seconds`, so a
+  `go test` that spawns a test binary does not outlive its deadline. Output is
+  clipped to `max_command_output_bytes`.
+
+Choose allowlist entries with the same care you would give a sudoers file. A
+broad entry is a broad grant: `"go"` permits `go run ./anything`, and `"make"`
+permits whatever the project's Makefile does. Prefer the narrowest prefix that
+does the job.
+
 **Remaining limitations** -- these are real:
 
 - **Anything the model reads can reach the model's operator.** If you point
@@ -56,6 +83,10 @@ terms and survives a future flag or backend that loosens git's.
 - **Confinement is the project directory, not a sandbox.** Everything inside the
   project is fair game, including files you would rather the model not read.
   There is no per-file policy and no allowlist.
+- **An allowed command is not confined.** `run_command` sets the working
+  directory to the project, but the command itself runs with your full user
+  privileges and can reach anything you can. Path confinement bounds metron's
+  own tools; it cannot bound a program you have permitted to run.
 - **Prompt injection is not mitigated.** Content in the files metron reads is
   data, but a sufficiently persuasive comment in a source file may influence what
   the model proposes. The approval prompt is the mitigation. Read the diffs.

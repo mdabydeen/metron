@@ -17,11 +17,12 @@ const (
 	ToolSearchText = "search_text"
 	ToolViewSlice  = "view_slice"
 	ToolApplyPatch = "apply_patch"
+	ToolRunCommand = "run_command"
 )
 
 // ToolNames lists every tool metron can expose, in the order the model sees
 // them: discover, locate, read, then change.
-var ToolNames = []string{ToolListFiles, ToolFindSymbol, ToolSearchText, ToolViewSlice, ToolApplyPatch}
+var ToolNames = []string{ToolListFiles, ToolFindSymbol, ToolSearchText, ToolViewSlice, ToolApplyPatch, ToolRunCommand}
 
 // Dependency describes one external binary and the tools that stop working
 // without it. ripgrep backs two of them, which is why this is a list.
@@ -94,6 +95,13 @@ func (e Env) UnavailableTools() map[string]string {
 		for _, tool := range p.dep.Tools {
 			out[tool] = fmt.Sprintf("%s (%s)", p.reason, p.dep.Hint)
 		}
+	}
+	// run_command has no binary behind it; what it needs is permission. An
+	// empty allowlist is the default, so this is the usual state rather than a
+	// fault -- which is why it is reported here, where it withdraws the tool,
+	// and not by Preflight, which is for things that are wrong.
+	if len(e.Allowed) == 0 {
+		out[ToolRunCommand] = "no commands are permitted (set allowed_commands in .metron.json)"
 	}
 	return out
 }

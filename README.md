@@ -196,6 +196,9 @@ cp metron.example.json .metron.json
 | `search_max_per_file` | `2` | `search_text` results per file |
 | `list_max_entries` | `60` | paths `list_files` will return |
 | `disabled_tools` | `[]` | tool names to withhold from the model entirely |
+| `allowed_commands` | `[]` | argv prefixes `run_command` may execute; empty withdraws the tool |
+| `command_timeout_seconds` | `120` | wall clock one `run_command` gets |
+| `max_command_output_bytes` | `4000` | combined output `run_command` returns |
 
 A file that exists but cannot be read or parsed is a startup error, not a silent fallback —
 including unknown keys, so a typo like `"modle"` is reported instead of ignored. Values are
@@ -235,8 +238,9 @@ layer won.
 
 metron only advertises tools that can actually run. A missing ripgrep withdraws `list_files`
 and `search_text`; a BSD `ctags` withdraws `find_symbol`; running outside a git repository
-withdraws `apply_patch`. `disabled_tools` withdraws whatever you name, and an unknown name
-there is a startup error rather than a silent no-op.
+withdraws `apply_patch`; an empty `allowed_commands` withdraws `run_command`.
+`disabled_tools` withdraws whatever you name, and an unknown name there is a startup error
+rather than a silent no-op.
 
 This is a budget, not just tidiness. **Tool schemas are sent with every single request**, so
 an unusable tool is a tax on every turn — and naming it in the system prompt invites the
@@ -257,8 +261,8 @@ message telling it not to retry.
 
 ## The tools
 
-Five tools, all methods on the `tools.Env` that holds the project root and the budgets. This
-is the complete surface the model has for touching your code.
+Six tools, all methods on the `tools.Env` that holds the project root, the budgets and the
+command allowlist. This is the complete surface the model has for touching your code.
 
 ### `list_files(pattern)`
 
@@ -305,6 +309,31 @@ stdin. Patch failures are returned as *text*, not Go errors, so the model sees g
 complaint and can correct the diff itself. Only a missing `git` binary surfaces as a real
 error, since that is an environment fault rather than a bad patch.
 
+### `run_command(command)`
+
+Runs one command in the project and returns its exit status and output, so the model can
+check its own work instead of asserting it. **Off by default** — with no `allowed_commands`
+set, the tool is not offered at all.
+
+There is no shell. The command is split on whitespace and executed directly, so `;`, `&&`,
+`|`, redirection and globs are never interpreted; they arrive as literal arguments and the
+program rejects them. The allowlist matches whole argv tokens, so `"go test"` permits
+`go test ./...` and refuses `go tool`, `gotcha test` and `env go test`.
+
+Each run is asked about at the prompt, killed with its whole process group at
+`command_timeout_seconds`, and clipped to `max_command_output_bytes` — keeping the head and
+the tail, since that is where a compiler puts the offending file and the summary.
+
+A non-zero exit is data, not an error: "the tests still fail" is exactly what the model
+asked to find out.
+
+```json
+{ "allowed_commands": ["go test", "go build", "go vet"] }
+```
+
+Choose these entries with the care you would give a sudoers file. `"go"` permits
+`go run ./anything`; `"make"` permits whatever the Makefile does. See [SECURITY.md](SECURITY.md).
+
 ## Architecture
 
 ```
@@ -312,7 +341,7 @@ cmd/metron/main.go   REPL and commands. No conversation state lives here.
 internal/config      Settings: defaults, JSON file, environment, validation.
 internal/ollama      HTTP client for Ollama's /api/chat, plus the shared wire types.
 internal/agent       The agent loop, the system prompt, tool schemas, compaction.
-internal/tools       The five tools plus the startup dependency check.
+internal/tools       The six tools, the project confinement, the dependency check.
 ```
 
 Seams are interfaces, so each layer can be driven in isolation: `agent.New` takes a `Chatter`

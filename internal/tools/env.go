@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Budgets bounds what each tool is allowed to return. Every field was once a
@@ -18,6 +19,9 @@ type Budgets struct {
 	SearchMaxMatches int // total ripgrep matches
 	SearchMaxPerFile int // ripgrep matches per file
 	ListMaxEntries   int // paths list_files will return
+
+	CommandTimeout        time.Duration // wall clock a single run_command gets
+	MaxCommandOutputBytes int           // combined output run_command will return
 }
 
 // DefaultBudgets matches metron's built-in configuration.
@@ -28,6 +32,9 @@ func DefaultBudgets() Budgets {
 		SearchMaxMatches: 10,
 		SearchMaxPerFile: 2,
 		ListMaxEntries:   60,
+
+		CommandTimeout:        120 * time.Second,
+		MaxCommandOutputBytes: 4000,
 	}
 }
 
@@ -44,11 +51,40 @@ func DefaultBudgets() Budgets {
 type Env struct {
 	Root    string
 	Budgets Budgets
+
+	// Allowed is the set of command prefixes run_command may execute, already
+	// split into argv. An empty list -- the default -- means the tool is not
+	// offered at all, so granting execution is something an operator does on
+	// purpose rather than something they forget to switch off.
+	Allowed [][]string
 }
 
 // NewEnv builds an Env rooted at the current repository.
 func NewEnv(b Budgets) Env {
-	return Env{Root: repoRoot(), Budgets: b}
+	return Env{Budgets: b}.Rooted()
+}
+
+// Rooted fills in Root if it is not already set, leaving every other field
+// alone. Callers that build an Env field by field -- setting Allowed, say --
+// use this to resolve the root without having their other choices replaced.
+func (e Env) Rooted() Env {
+	if e.Root == "" {
+		e.Root = repoRoot()
+	}
+	return e
+}
+
+// ParseAllowlist splits each configured command into the argv prefix a call has
+// to begin with. Splitting once, here, keeps the matching in Allows a plain
+// comparison rather than a parse repeated on every call.
+func ParseAllowlist(commands []string) [][]string {
+	var out [][]string
+	for _, c := range commands {
+		if fields := strings.Fields(c); len(fields) > 0 {
+			out = append(out, fields)
+		}
+	}
+	return out
 }
 
 // repoRoot returns the directory tools resolve paths against: the enclosing

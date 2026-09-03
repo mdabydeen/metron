@@ -449,7 +449,7 @@ func TestCommandHistoryReportsTheBudget(t *testing.T) {
 func TestApproveAcceptsYes(t *testing.T) {
 	for _, answer := range []string{"y\n", "Y\n", "yes\n", "  YES  \n"} {
 		var out bytes.Buffer
-		if !approve(&out, replFor(answer), "--- a/x\n+++ b/x\n") {
+		if !approve(&out, replFor(answer), "patch", "--- a/x\n+++ b/x\n") {
 			t.Fatalf("approve(%q) = false, want the patch approved", answer)
 		}
 		if !strings.Contains(out.String(), "--- a/x") {
@@ -461,7 +461,7 @@ func TestApproveAcceptsYes(t *testing.T) {
 func TestApproveRejectsAnythingElse(t *testing.T) {
 	for _, answer := range []string{"n\n", "\n", "no\n", "later\n"} {
 		var out bytes.Buffer
-		if approve(&out, replFor(answer), "diff") {
+		if approve(&out, replFor(answer), "patch", "diff") {
 			t.Fatalf("approve(%q) = true, want anything but yes to decline", answer)
 		}
 		if !strings.Contains(out.String(), "not applied") {
@@ -472,7 +472,7 @@ func TestApproveRejectsAnythingElse(t *testing.T) {
 
 func TestApproveTreatsEOFAsNo(t *testing.T) {
 	var out bytes.Buffer
-	if approve(&out, replFor(""), "diff") {
+	if approve(&out, replFor(""), "patch", "diff") {
 		t.Fatal("approve() = true at EOF, want an absent operator to decline")
 	}
 	if !strings.Contains(out.String(), "No input") {
@@ -944,5 +944,42 @@ func TestCommandConfigSaysWhenNoToolsAreAdvertised(t *testing.T) {
 
 	if !strings.Contains(out.String(), "tools: none advertised") {
 		t.Fatalf("/config output = %q, want the empty tool set stated", out.String())
+	}
+}
+
+func TestApprovePromptsDifferentlyForCommands(t *testing.T) {
+	var out bytes.Buffer
+
+	if approve(&out, replFor("n\n"), "command", "rm -rf /") {
+		t.Fatal("approve() = true, want the command refused")
+	}
+	// Being asked to let something execute is not the same as being asked to
+	// accept an edit, and the prompt should not blur them.
+	for _, want := range []string{"Proposed command", "rm -rf /", "Run this command?", "Command not run."} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("approve() output = %q, missing %q", out.String(), want)
+		}
+	}
+}
+
+func TestApproveFallsBackForAnUnknownKind(t *testing.T) {
+	var out bytes.Buffer
+
+	if approve(&out, replFor("n\n"), "something-new", "details") {
+		t.Fatal("approve() = true, want an unknown kind refused by default")
+	}
+	if !strings.Contains(out.String(), "Allow this?") {
+		t.Fatalf("approve() output = %q, want a generic prompt rather than a crash", out.String())
+	}
+}
+
+func TestApproveOnEOFNamesWhatWasNotDone(t *testing.T) {
+	var out bytes.Buffer
+
+	if approve(&out, replFor(""), "command", "go test") {
+		t.Fatal("approve() = true, want EOF to answer no")
+	}
+	if !strings.Contains(out.String(), "command not run") {
+		t.Fatalf("approve() output = %q, want the refusal to name the kind", out.String())
 	}
 }
