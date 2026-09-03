@@ -179,6 +179,7 @@ cp metron.example.json .metron.json
 
 | Key | Default | Meaning |
 | --- | --- | --- |
+| `profile` | `"standard"` | budget preset: `tight`, `standard` or `roomy` |
 | `provider` | `"ollama"` | wire format: `ollama` or `openai` |
 | `api_key_env` | `""` | environment variable holding the API key, if the endpoint wants one |
 | `endpoint` | `http://localhost:11434/api/chat` | Ollama chat endpoint, path included |
@@ -190,6 +191,7 @@ cp metron.example.json .metron.json
 | `num_ctx` | `16384` | context window requested from Ollama |
 | `max_turns` | `10` | model round-trips allowed in one user turn |
 | `compact_threshold_bytes` | `400` | tool output above this size is purged after the turn |
+| `max_prompt_tokens` | `0` | ceiling on prompt tokens for one turn; `0` means none |
 | `repo_map_tokens` | `0` | tokens for a project map injected once per session; `0` disables it |
 | `max_history_messages` | `60` | messages kept after a turn, excluding the system prompt |
 | `max_slice_lines` | `120` | widest span `view_slice` will read |
@@ -349,6 +351,41 @@ An empty `replace` deletes the matched lines; an empty `search` creates the file
 approve a unified diff** — the format exists to make the model's job easier, not yours.
 
 It also needs no `git`, so on a machine without it this is the only working edit path.
+
+### Budgets for a whole turn
+
+Every other budget bounds one tool. `max_prompt_tokens` bounds the turn:
+
+```
+metron > /budget 8000
+Per-turn ceiling set to 8000 prompt tokens.
+```
+
+Enforcement is predictive, and has to be: a server reports `prompt_eval_count` only once it
+has evaluated the prompt, which is *after* the tokens are spent — a ceiling that waited for a
+real number could report an overrun but never prevent one. metron estimates from the size of
+what it is about to send, and corrects that estimate against every count the server does
+report, so it converges on the tokeniser actually in use. `/budget` shows both numbers.
+
+When a turn approaches its ceiling, metron sheds rather than truncates, because cutting a
+turn off mid-thought wastes everything it has done:
+
+1. purge file slices already read — the largest and most re-requestable thing in the history;
+2. drop the oldest exchanges, leaving the note that says a gap is there;
+3. if there is nothing left to shed, stop and say so, with what was learned.
+
+Running out of budget is an outcome, not an error. The exit code stays 0 and the answer
+explains itself.
+
+### Profiles
+
+Eleven numbers is too many to tune blind, so `profile` supplies a starting point — `tight`
+for a 7B on a laptop, `standard`, `roomy` for a 32B with room to spare. Individual settings
+in the same file still win, so a profile is a baseline rather than a lock.
+
+**These are reasoned, not measured.** metron ships a benchmark so that claims like these can
+be checked: run `make bench` against your own model and adjust. Presenting a guess as a
+finding would be exactly the thing this project exists to argue against.
 
 ### Sessions
 

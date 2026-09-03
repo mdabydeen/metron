@@ -24,6 +24,10 @@ type Config struct {
 	// Provider selects the wire format. "openai" reaches llama.cpp's server,
 	// LM Studio, vLLM, OpenRouter and Ollama's own compatibility endpoint, so
 	// one setting covers most of what people actually run.
+	// Profile is a named set of budgets to start from. Individual settings in
+	// the same file still win, so a profile is a baseline rather than a lock.
+	Profile string `json:"profile"`
+
 	Provider string `json:"provider"`
 	Endpoint string `json:"endpoint"`
 	Model    string `json:"model"`
@@ -50,6 +54,10 @@ type Config struct {
 	// filenames. Zero disables it, which is the default until the benchmark
 	// shows the turns saved outweigh the tokens spent on every request.
 	RepoMapTokens int `json:"repo_map_tokens"`
+	// MaxPromptTokens caps what one turn may spend on prompt tokens across all
+	// its round-trips. Zero means no ceiling. Every other budget bounds one
+	// tool; this bounds the turn.
+	MaxPromptTokens int `json:"max_prompt_tokens"`
 
 	// Tool budgets
 	MaxSliceLines    int `json:"max_slice_lines"`
@@ -97,6 +105,7 @@ type Config struct {
 // Defaults returns the built-in configuration.
 func Defaults() Config {
 	return Config{
+		Profile:            ProfileStandard,
 		Provider:           ProviderOllama,
 		Endpoint:           "http://localhost:11434/api/chat",
 		APIKeyEnv:          "",
@@ -110,6 +119,7 @@ func Defaults() Config {
 		CompactThreshold:   400,
 		MaxHistoryMessages: 60,
 		RepoMapTokens:      0,
+		MaxPromptTokens:    0,
 		MaxSliceLines:      120,
 		MaxLineChars:       500,
 		SearchMaxMatches:   10,
@@ -125,6 +135,50 @@ func Defaults() Config {
 		SaveSessions:       false,
 		AutoApprovePatches: false,
 	}
+}
+
+// Budget profiles. Eleven numbers is too many to tune blind, so these are the
+// starting points for the three situations people actually have.
+//
+// They are reasoned, not measured. metron ships a benchmark precisely so that
+// claims like these can be checked -- run `make bench` against your own model
+// and adjust. Saying so is better than presenting a guess as a finding.
+const (
+	ProfileTight    = "tight"    // a 7B on a laptop with a small context window
+	ProfileStandard = "standard" // the built-in defaults
+	ProfileRoomy    = "roomy"    // a 32B with room to spare
+)
+
+// Profiles lists the valid profile settings.
+var Profiles = []string{ProfileTight, ProfileStandard, ProfileRoomy}
+
+// applyProfile returns cfg with one profile's budgets applied over it.
+func applyProfile(cfg Config, name string) Config {
+	switch name {
+	case ProfileTight:
+		cfg.NumCtx = 8192
+		cfg.MaxSliceLines = 60
+		cfg.MaxLineChars = 300
+		cfg.SearchMaxMatches = 6
+		cfg.SearchMaxPerFile = 1
+		cfg.ListMaxEntries = 40
+		cfg.MaxHistoryMessages = 30
+		cfg.CompactThreshold = 300
+		cfg.MaxTurns = 8
+		cfg.RepoMapTokens = 0
+		cfg.MaxPromptTokens = 6000
+	case ProfileRoomy:
+		cfg.NumCtx = 32768
+		cfg.MaxSliceLines = 200
+		cfg.MaxLineChars = 800
+		cfg.SearchMaxMatches = 20
+		cfg.SearchMaxPerFile = 3
+		cfg.ListMaxEntries = 100
+		cfg.MaxHistoryMessages = 80
+		cfg.MaxTurns = 12
+		cfg.RepoMapTokens = 600
+	}
+	return cfg
 }
 
 // The wire formats metron can speak.
@@ -208,14 +262,28 @@ func Load() (Config, string, []string, error) {
 		if err != nil {
 			return cfg, path, nil, fmt.Errorf("read config %s: %w", path, err)
 		}
+		// One parse serves both jobs below. Doing them separately meant two
+		// json.Unmarshal calls over the same bytes, where the second could
+		// never fail if the first had not -- a branch no test could reach.
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(data, &raw); err != nil {
+			return cfg, path, nil, fmt.Errorf("parse config %s: %w", path, err)
+		}
+
+		// A profile is a baseline the same file may then override, so it has
+		// to be applied before the file is decoded over it.
+		if name, err := profileFrom(raw); err != nil {
+			return cfg, path, nil, err
+		} else if name != "" {
+			cfg = applyProfile(cfg, name)
+		}
+
 		// A project file is untrusted input: it arrives with the code, not from
 		// the operator. Note which authority-granting keys it sets so they can
 		// be undone after decoding.
 		var granted []string
 		if isProjectFile(path) {
-			if granted, err = dropPrivileged(data, path); err != nil {
-				return cfg, path, nil, err
-			}
+			granted = privilegedIn(raw)
 		}
 		dec := json.NewDecoder(strings.NewReader(string(data)))
 		dec.DisallowUnknownFields()
@@ -260,26 +328,37 @@ func isProjectFile(path string) bool {
 	return path == ProjectFile
 }
 
-// dropPrivileged reports which authority-granting keys a raw config sets, so
-// the caller can reset them after decoding and tell the operator what it
-// refused.
+// privilegedIn reports which authority-granting keys a raw config sets.
 //
 // Presence is read from the raw JSON rather than from the decoded struct
-// because a decoded false is indistinguishable from an absent key -- and
-// "the project tried to set this and it was ignored" is exactly the thing
-// worth saying out loud.
-func dropPrivileged(data []byte, path string) ([]string, error) {
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return nil, fmt.Errorf("parse config %s: %w", path, err)
-	}
+// because a decoded false is indistinguishable from an absent key -- and "the
+// project tried to set this and it was ignored" is exactly the thing worth
+// saying out loud.
+func privilegedIn(raw map[string]json.RawMessage) []string {
 	var found []string
 	for _, key := range privileged {
 		if _, present := raw[key]; present {
 			found = append(found, key)
 		}
 	}
-	return found, nil
+	return found
+}
+
+// profileFrom reads and validates the profile a raw config names.
+func profileFrom(raw map[string]json.RawMessage) (string, error) {
+	value, present := raw["profile"]
+	if !present {
+		return "", nil
+	}
+	var name string
+	if err := json.Unmarshal(value, &name); err != nil {
+		return "", fmt.Errorf("invalid config: profile must be a string")
+	}
+	if name != "" && !slices.Contains(Profiles, name) {
+		return "", fmt.Errorf("invalid config: profile must be one of %s (got %q)",
+			strings.Join(Profiles, ", "), name)
+	}
+	return name, nil
 }
 
 // Validate rejects settings that would make the agent misbehave rather than
@@ -313,6 +392,9 @@ func (c Config) Validate() error {
 			problems = append(problems, fmt.Sprintf("%s must be > 0 (got %d)", check.name, check.val))
 		}
 	}
+	if c.MaxPromptTokens < 0 {
+		problems = append(problems, fmt.Sprintf("max_prompt_tokens must be >= 0 (got %d)", c.MaxPromptTokens))
+	}
 	if c.RepoMapTokens < 0 {
 		problems = append(problems, fmt.Sprintf("repo_map_tokens must be >= 0 (got %d)", c.RepoMapTokens))
 	}
@@ -329,6 +411,10 @@ func (c Config) Validate() error {
 			problems = append(problems, fmt.Sprintf("disabled_tools: unknown tool %q (known: %s)",
 				name, strings.Join(tools.ToolNames, ", ")))
 		}
+	}
+	if !slices.Contains(Profiles, c.Profile) {
+		problems = append(problems, fmt.Sprintf("profile must be one of %s (got %q)",
+			strings.Join(Profiles, ", "), c.Profile))
 	}
 	if !slices.Contains(Providers, c.Provider) {
 		problems = append(problems, fmt.Sprintf("provider must be one of %s (got %q)",

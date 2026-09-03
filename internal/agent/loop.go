@@ -25,6 +25,15 @@ type Options struct {
 	// that only cares about the loop can leave it alone.
 	Env tools.Env
 
+	// MaxPromptTokens caps what one Step may spend on prompt tokens across all
+	// its round-trips. Zero means no ceiling.
+	//
+	// This is the feature the rest of the program has been arguing for: every
+	// other budget bounds one tool, and this bounds the turn. Enforcement has
+	// to be predictive, because a token count only arrives *after* the call it
+	// describes -- see estimatePromptTokens.
+	MaxPromptTokens int
+
 	// RepoMapTokens budgets a structural summary of the project, injected once
 	// per session. Zero disables it. It is paid for on every request of the
 	// session, so it defaults off until the benchmark says the turns it saves
@@ -81,6 +90,11 @@ type Agent struct {
 	advertised  []string
 	schemas     []llm.Tool
 	unavailable map[string]string
+
+	// bytesPerToken is calibrated from what the server reports, so the estimate
+	// used to enforce MaxPromptTokens tracks the model actually in use rather
+	// than a constant that is wrong for every tokeniser.
+	bytesPerToken float64
 }
 
 // promptOpening and promptClosing bracket the per-tool directives. The contract
@@ -141,7 +155,50 @@ func New(client Chatter, opts Options) *Agent {
 		unavailable: unavailable,
 	}
 	a.messages = a.seed()
+	a.bytesPerToken = defaultBytesPerToken
 	return a
+}
+
+// defaultBytesPerToken is the starting estimate, before any real count has been
+// seen. Roughly right for English and for code in most tokenisers, and corrected
+// after the first reply.
+const defaultBytesPerToken = 4.0
+
+// historyBytes is the size of what would be sent, schemas included. The schemas
+// are part of every request and are large enough to matter.
+func (a *Agent) historyBytes() int {
+	n := 0
+	for _, m := range a.messages {
+		n += len(m.Content) + len(m.Role) + len(m.ToolName)
+	}
+	if b, err := json.Marshal(a.schemas); err == nil {
+		n += len(b)
+	}
+	return n
+}
+
+// estimatePromptTokens guesses what the next call will cost.
+//
+// It has to be a guess. The server reports prompt_eval_count only once it has
+// evaluated the prompt, which is after the tokens have been spent -- so a
+// ceiling that waited for a real number could only ever report an overrun,
+// never prevent one. The estimate is corrected against the real count after
+// every call, so it converges on the tokeniser in use.
+func (a *Agent) estimatePromptTokens() int {
+	return int(float64(a.historyBytes()) / a.bytesPerToken)
+}
+
+// calibrate folds a real count into the estimate. The weighting is heavy on
+// history because one anomalous call -- a cache hit, a server that counts
+// differently -- should nudge the estimate rather than redefine it.
+func (a *Agent) calibrate(promptTokens int) {
+	if promptTokens <= 0 {
+		return
+	}
+	// historyBytes is never zero -- the schemas alone marshal to something --
+	// so the ratio is always positive and needs no guard.
+	observed := float64(a.historyBytes()) / float64(promptTokens)
+	a.bytesPerToken = 0.7*a.bytesPerToken + 0.3*observed
 }
 
 // seed builds the opening history: the system prompt, and the repo map when one
@@ -340,12 +397,20 @@ func (a *Agent) Step(ctx context.Context, userPrompt string) (string, error) {
 
 	// Execution loop
 	for turns := 0; turns < a.opts.MaxTurns; turns++ {
+		if stop := a.enforceBudget(); stop != "" {
+			// Running out of budget is an outcome, not a malfunction: the
+			// operator asked for an answer within a ceiling and this is what
+			// there was. Returning it as an error would throw away the work.
+			a.compactContext()
+			return stop, nil
+		}
 		resp, err := a.client.Chat(ctx, a.messages, a.schemas)
 		if err != nil {
 			return "", err
 		}
 
 		a.lastUsage.Add(resp.Usage)
+		a.calibrate(resp.Usage.PromptTokens)
 		a.messages = append(a.messages, resp.Message)
 
 		if len(resp.ToolCalls) == 0 {
@@ -370,6 +435,53 @@ func (a *Agent) Step(ctx context.Context, userPrompt string) (string, error) {
 	}
 
 	return "", fmt.Errorf("max turns exceeded")
+}
+
+// budgetPressure is the share of the ceiling at which the loop starts
+// economising rather than waiting to hit it.
+const budgetPressure = 0.8
+
+// enforceBudget keeps a turn inside MaxPromptTokens, degrading rather than
+// truncating. It returns a final answer when there is no room left to continue,
+// and "" when the turn may proceed.
+//
+// The ladder matters more than the ceiling. Cutting a turn off mid-thought
+// wastes everything it has done; shedding the most expendable context first
+// usually leaves enough room to finish.
+func (a *Agent) enforceBudget() string {
+	ceiling := a.opts.MaxPromptTokens
+	if ceiling <= 0 {
+		return ""
+	}
+	if a.estimatePromptTokens() < int(float64(ceiling)*budgetPressure) {
+		return ""
+	}
+
+	// First: purge file slices already read. They are the largest thing in the
+	// history and the most re-requestable.
+	a.compactContext()
+	if a.estimatePromptTokens() < ceiling {
+		return ""
+	}
+
+	// Then: drop the oldest exchanges, leaving the elision note so the model
+	// knows the gap is there rather than reasoning from a history it believes
+	// is complete.
+	for a.estimatePromptTokens() >= ceiling && len(a.messages) > a.seedLen()+2 {
+		saved := a.opts.MaxHistoryMessages
+		a.opts.MaxHistoryMessages = max(1, len(a.messages)-a.seedLen()-2)
+		a.trimHistory()
+		a.opts.MaxHistoryMessages = saved
+	}
+	if a.estimatePromptTokens() < ceiling {
+		return ""
+	}
+
+	// Nothing left to shed. Say so plainly rather than failing: the operator
+	// asked for an answer within a ceiling, and this is what there was room for.
+	return fmt.Sprintf("Stopped at roughly %d tokens of a %d prompt-token budget for this "+
+		"turn. Raise max_prompt_tokens, or narrow the request.",
+		a.estimatePromptTokens(), ceiling)
 }
 
 func (a *Agent) dispatch(ctx context.Context, call llm.ToolCall) string {
@@ -599,6 +711,18 @@ type ToolRun struct {
 	Name string `json:"name"`
 	Ms   int64  `json:"ms"`
 }
+
+// SetMaxPromptTokens changes the per-turn ceiling mid-session, backing /budget.
+// Zero removes it.
+func (a *Agent) SetMaxPromptTokens(n int) { a.opts.MaxPromptTokens = n }
+
+// MaxPromptTokens reports the current per-turn ceiling.
+func (a *Agent) MaxPromptTokens() int { return a.opts.MaxPromptTokens }
+
+// EstimatedPromptTokens reports what the next call is expected to cost, so an
+// operator can see the number the ceiling is compared against rather than
+// having to trust it.
+func (a *Agent) EstimatedPromptTokens() int { return a.estimatePromptTokens() }
 
 // LastTools reports the tools the most recent Step ran, in order.
 func (a *Agent) LastTools() []ToolRun { return a.lastTools }

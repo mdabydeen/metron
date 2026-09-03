@@ -31,6 +31,16 @@ is pre-1.0, the minor version is bumped for breaking changes to configuration or
   a git repository withdraws `apply_patch`. Their schemas are then not sent at all, and the
   system prompt stops naming them — on a stock Mac that is ~164 fewer prompt tokens on every
   request. A call to an unadvertised tool is refused before it runs.
+- `max_prompt_tokens` caps what a single turn may spend, and `/budget` sets it mid-session.
+  Every other budget bounds one tool; this bounds the turn. Enforcement is predictive --
+  token counts only arrive after the tokens are spent -- and the estimate is corrected
+  against every count the server reports, so it converges on the tokeniser in use. On
+  approaching the ceiling metron sheds context in order (file slices first, then the oldest
+  exchanges, both stated in the history) rather than truncating mid-thought; if there is
+  nothing left to shed it stops and says so, as an answer rather than an error.
+- `profile` supplies a starting set of budgets: `tight`, `standard`, `roomy`. Individual
+  settings in the same file still win. The values are reasoned rather than measured, and the
+  documentation says so -- `make bench` is how to check them against your own model.
 - `find_symbol` works without Universal Ctags. metron now carries a pure-Go symbol index
   (`go/ast`), so on a stock Mac -- where Apple's BSD ctags rejects the flags metron needs --
   the tool is available rather than withdrawn, on the very language metron is written in.

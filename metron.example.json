@@ -1,4 +1,5 @@
 {
+  "profile": "standard",
   "provider": "ollama",
   "endpoint": "http://localhost:11434/api/chat",
   "model": "qwen2.5-coder:32b",
@@ -14,6 +15,7 @@
   "compact_threshold_bytes": 400,
   "max_history_messages": 60,
   "repo_map_tokens": 0,
+  "max_prompt_tokens": 0,
 
   "max_slice_lines": 120,
   "max_line_chars": 500,

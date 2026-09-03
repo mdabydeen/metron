@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,7 +30,8 @@ const helpText = `Commands:
   /save    write the conversation to disk now
   /sessions list saved sessions and how to resume one
   /history show how much conversation is being carried
-  /tags    rebuild the ctags symbol index for the current directory
+  /budget  show, set (/budget 8000) or lift (/budget off) the per-turn token ceiling
+  /tags    rebuild the symbol index for the current directory
   /exit    quit (also: exit, quit, Ctrl-D)
 
 Anything else is sent to the model. It can only see your code through
@@ -45,6 +47,9 @@ type stepper interface {
 	HistorySize() (messages, bytes int)
 	LastUsage() (llm.Usage, int)
 	LastTools() []agent.ToolRun
+	SetMaxPromptTokens(n int)
+	MaxPromptTokens() int
+	EstimatedPromptTokens() int
 	AdvertisedTools() (names []string, schemaBytes int)
 	Messages() []llm.Message
 	Restore(messages []llm.Message)
@@ -161,6 +166,7 @@ func runMain(args []string, in io.Reader, out, errOut io.Writer) int {
 		CompactThreshold:   cfg.CompactThreshold,
 		MaxHistoryMessages: cfg.MaxHistoryMessages,
 		RepoMapTokens:      cfg.RepoMapTokens,
+		MaxPromptTokens:    cfg.MaxPromptTokens,
 		Env:                env,
 		DisabledTools:      cfg.DisabledTools,
 		Progress:           out,
@@ -437,6 +443,8 @@ func command(out io.Writer, input string, cfg config.Config, cfgPath string, env
 		msgs, bytes := bot.HistorySize()
 		fmt.Fprintf(out, "history: %d messages, ~%d bytes (budget: %d messages; /reset clears it)\n",
 			msgs, bytes, cfg.MaxHistoryMessages)
+	case "/budget":
+		showBudget(out, bot)
 	case "/tags":
 		if err := env.RebuildTags(); err != nil {
 			fmt.Fprintf(out, "\033[31mError: %v\033[0m\n", err)
@@ -444,6 +452,10 @@ func command(out io.Writer, input string, cfg config.Config, cfgPath string, env
 		}
 		fmt.Fprintln(out, "Symbol index rebuilt.")
 	default:
+		if arg, ok := strings.CutPrefix(input, "/budget "); ok {
+			setBudget(out, bot, strings.TrimSpace(arg))
+			break
+		}
 		if strings.HasPrefix(input, "/") {
 			fmt.Fprintf(out, "Unknown command %q. Try /help.\n", input)
 		}
@@ -490,4 +502,39 @@ func newProvider(cfg config.Config, opts llm.Options) agent.Chatter {
 		return openai.NewClient(cfg.Endpoint, cfg.Model, opts)
 	}
 	return ollama.NewClient(cfg.Endpoint, cfg.Model, opts)
+}
+
+// showBudget reports the per-turn ceiling and what the next call is expected to
+// cost against it. The estimate is shown rather than hidden because the ceiling
+// is enforced against it, not against a number the server has yet to report.
+func showBudget(out io.Writer, bot stepper) {
+	ceiling := bot.MaxPromptTokens()
+	estimate := bot.EstimatedPromptTokens()
+	if ceiling <= 0 {
+		fmt.Fprintf(out, "No per-turn ceiling. The next call is estimated at ~%d prompt tokens.\n", estimate)
+		fmt.Fprintln(out, "Set one with: /budget 8000")
+		return
+	}
+	fmt.Fprintf(out, "Per-turn ceiling: %d prompt tokens. The next call is estimated at ~%d.\n",
+		ceiling, estimate)
+}
+
+// setBudget applies a new ceiling. "off" and "0" both remove it.
+func setBudget(out io.Writer, bot stepper, arg string) {
+	if arg == "off" || arg == "none" {
+		bot.SetMaxPromptTokens(0)
+		fmt.Fprintln(out, "Per-turn ceiling lifted.")
+		return
+	}
+	n, err := strconv.Atoi(arg)
+	if err != nil || n < 0 {
+		fmt.Fprintf(out, "Not a token count: %q. Try /budget 8000, or /budget off.\n", arg)
+		return
+	}
+	bot.SetMaxPromptTokens(n)
+	if n == 0 {
+		fmt.Fprintln(out, "Per-turn ceiling lifted.")
+		return
+	}
+	fmt.Fprintf(out, "Per-turn ceiling set to %d prompt tokens.\n", n)
 }

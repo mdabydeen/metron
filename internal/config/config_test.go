@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -490,17 +491,26 @@ func TestProjectFileThatIsNotAnObject(t *testing.T) {
 }
 
 func TestDropPrivilegedNamesWhatAProjectFileTriedToSet(t *testing.T) {
-	got, err := dropPrivileged([]byte(`{"model":"m","allowed_commands":["sh"],"save_sessions":false}`), "x")
-	if err != nil {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(`{"model":"m","allowed_commands":["sh"],"save_sessions":false}`), &raw); err != nil {
 		t.Fatal(err)
 	}
+	got := privilegedIn(raw)
 	// save_sessions:false is still *set*, and a decoded false looks identical
 	// to an absent key -- so presence is read from the raw JSON.
 	if len(got) != 2 {
 		t.Fatalf("dropPrivileged() = %v, want both privileged keys named", got)
 	}
-	if _, err := dropPrivileged([]byte(`not json`), "x"); err == nil {
-		t.Fatal("dropPrivileged() = nil error for unparseable input")
+}
+
+func TestProfileFromRejectsAWrongType(t *testing.T) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(`{"profile": 3}`), &raw); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := profileFrom(raw); err == nil || !strings.Contains(err.Error(), "must be a string") {
+		t.Fatalf("profileFrom() = %v, want a non-string profile rejected", err)
 	}
 }
 
@@ -544,5 +554,88 @@ func TestValidateRejectsANegativeRepoMapBudget(t *testing.T) {
 	cfg.RepoMapTokens = 0
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate() = %v, want zero accepted as 'disabled'", err)
+	}
+}
+
+func TestProfileIsABaselineTheSameFileCanOverride(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("METRON_CONFIG", "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("OLLAMA_HOST", "")
+	t.Setenv("OLLAMA_MODEL", "")
+	if err := os.WriteFile(ProjectFile,
+		[]byte(`{"profile":"tight","max_slice_lines":99}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, _, _, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The profile supplies the budgets the file did not mention...
+	if cfg.NumCtx != 8192 || cfg.MaxHistoryMessages != 30 {
+		t.Fatalf("cfg = %+v, want the tight profile applied", cfg)
+	}
+	// ...and the file still wins where it did.
+	if cfg.MaxSliceLines != 99 {
+		t.Fatalf("MaxSliceLines = %d, want the file's own value to win", cfg.MaxSliceLines)
+	}
+}
+
+func TestUnknownProfileIsAStartupError(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("METRON_CONFIG", "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if err := os.WriteFile(ProjectFile, []byte(`{"profile":"enormous"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, _, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "profile") {
+		t.Fatalf("Load() error = %v, want an unknown profile rejected", err)
+	}
+	if !strings.Contains(err.Error(), "roomy") {
+		t.Fatalf("Load() error = %v, want the valid profiles listed", err)
+	}
+}
+
+func TestEveryProfileValidates(t *testing.T) {
+	// A profile that produces an invalid config would be a startup error the
+	// operator could not fix without reading the source.
+	for _, name := range Profiles {
+		cfg := applyProfile(Defaults(), name)
+		cfg.Profile = name
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("profile %q produces an invalid config: %v", name, err)
+		}
+	}
+}
+
+func TestTightProfileIsActuallyTighter(t *testing.T) {
+	tight := applyProfile(Defaults(), ProfileTight)
+	roomy := applyProfile(Defaults(), ProfileRoomy)
+
+	if tight.NumCtx >= roomy.NumCtx || tight.MaxSliceLines >= roomy.MaxSliceLines {
+		t.Fatalf("tight is not tighter than roomy: %+v vs %+v", tight, roomy)
+	}
+	// tight is the profile for a small local model, so it is the one that sets
+	// a per-turn ceiling by default.
+	if tight.MaxPromptTokens == 0 {
+		t.Fatal("the tight profile has no per-turn ceiling, which is the point of it")
+	}
+}
+
+func TestValidateRejectsANegativePromptCeilingAndProfile(t *testing.T) {
+	cfg := Defaults()
+	cfg.MaxPromptTokens = -1
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "max_prompt_tokens") {
+		t.Fatalf("Validate() error = %v, want a negative ceiling rejected", err)
+	}
+
+	cfg = Defaults()
+	cfg.Profile = "enormous"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "profile") {
+		t.Fatalf("Validate() error = %v, want an unknown profile rejected", err)
 	}
 }

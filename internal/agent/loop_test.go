@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1410,5 +1411,226 @@ func TestTrimHistoryKeepsTheRepoMap(t *testing.T) {
 	}
 	if a.messages[0].Role != "system" {
 		t.Fatalf("history[0] = %+v, want the system prompt kept", a.messages[0])
+	}
+}
+
+// bigSlice is a tool result large enough to matter to the budget.
+func bigSlice(path string, n int) llm.Message {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "%s:1-%d\n", path, n)
+	for i := 1; i <= n; i++ {
+		fmt.Fprintf(&sb, "%5d | %s\n", i, strings.Repeat("x", 60))
+	}
+	return llm.Message{Role: "tool", ToolName: "view_slice", Content: sb.String()}
+}
+
+func TestBudgetShedsSlicesBeforeGivingUp(t *testing.T) {
+	isolate(t)
+	opts := DefaultOptions()
+	opts.MaxPromptTokens = 2000
+	a := New(&fakeChatter{}, opts)
+	a.messages = append(a.messages,
+		llm.Message{Role: "user", Content: "find the bug"},
+		bigSlice("a.go", 200),
+		llm.Message{Role: "assistant", Content: "looking"},
+	)
+	before := a.estimatePromptTokens()
+
+	stop := a.enforceBudget()
+
+	// Slices already read are the largest thing in the history and the most
+	// re-requestable, so they go first -- and shedding them should be enough.
+	if stop != "" {
+		t.Fatalf("enforceBudget() = %q, want the turn allowed to continue after shedding", stop)
+	}
+	if a.estimatePromptTokens() >= before {
+		t.Fatalf("estimate did not fall: %d -> %d", before, a.estimatePromptTokens())
+	}
+	if !strings.Contains(a.messages[2].Content, "a.go:1-200 redacted") {
+		t.Fatalf("history = %q, want the slice purged by name", a.messages[2].Content)
+	}
+}
+
+func TestBudgetStopsCleanlyWhenNothingIsLeftToShed(t *testing.T) {
+	isolate(t)
+	opts := DefaultOptions()
+	// Below the size of the schemas alone, so no amount of shedding helps.
+	opts.MaxPromptTokens = 10
+	a := New(&fakeChatter{}, opts)
+	a.messages = append(a.messages, llm.Message{Role: "user", Content: "do the thing"})
+
+	stop := a.enforceBudget()
+
+	// Running out of budget is an outcome, not a malfunction.
+	if stop == "" {
+		t.Fatal("enforceBudget() = \"\", want the turn stopped")
+	}
+	for _, want := range []string{"prompt-token budget", "max_prompt_tokens", "narrow the request"} {
+		if !strings.Contains(stop, want) {
+			t.Errorf("stop message = %q, missing %q", stop, want)
+		}
+	}
+}
+
+func TestStepReturnsTheBudgetStopAsAnAnswerNotAnError(t *testing.T) {
+	isolate(t)
+	opts := DefaultOptions()
+	opts.MaxPromptTokens = 10
+	fake := &fakeChatter{}
+	a := New(fake, opts)
+
+	got, err := a.Step(context.Background(), "do the thing")
+
+	// Returning an error would throw away everything the turn had done, and
+	// the operator asked for an answer within a ceiling -- this is that answer.
+	if err != nil {
+		t.Fatalf("Step() error = %v, want the ceiling reported as an answer", err)
+	}
+	if !strings.Contains(got, "prompt-token budget") {
+		t.Fatalf("Step() = %q, want it to say why it stopped", got)
+	}
+	if fake.calls != 0 {
+		t.Fatalf("model calls = %d, want none once the ceiling is known to be unreachable", fake.calls)
+	}
+}
+
+func TestNoCeilingMeansNoInterference(t *testing.T) {
+	isolate(t)
+	a := New(&fakeChatter{}, DefaultOptions()) // MaxPromptTokens is 0
+	a.messages = append(a.messages, bigSlice("a.go", 500))
+
+	if got := a.enforceBudget(); got != "" {
+		t.Fatalf("enforceBudget() = %q, want no ceiling to mean no interference", got)
+	}
+	// And nothing should have been shed.
+	if strings.Contains(a.messages[1].Content, "redacted") {
+		t.Fatal("enforceBudget() compacted history with no ceiling set")
+	}
+}
+
+func TestEstimateIsCalibratedAgainstReportedCounts(t *testing.T) {
+	isolate(t)
+	a := New(&fakeChatter{}, DefaultOptions())
+	a.messages = append(a.messages, llm.Message{Role: "user", Content: strings.Repeat("x", 4000)})
+	start := a.bytesPerToken
+
+	// A server reporting far more tokens than 4 bytes-per-token predicts must
+	// move the estimate towards reality: the ceiling is enforced against the
+	// estimate, so an estimate that never learns is a ceiling that never holds.
+	a.calibrate(a.historyBytes() / 2)
+
+	if a.bytesPerToken >= start {
+		t.Fatalf("bytesPerToken = %v, want it moved towards the observed ratio from %v",
+			a.bytesPerToken, start)
+	}
+	// One anomalous call should nudge rather than redefine.
+	if a.bytesPerToken < 2.0 {
+		t.Fatalf("bytesPerToken = %v, want a single observation weighted, not adopted wholesale",
+			a.bytesPerToken)
+	}
+}
+
+func TestCalibrateIgnoresAbsentCounts(t *testing.T) {
+	isolate(t)
+	a := New(&fakeChatter{}, DefaultOptions())
+	start := a.bytesPerToken
+
+	// Servers that report nothing must not drag the estimate to zero.
+	a.calibrate(0)
+	a.calibrate(-5)
+
+	if a.bytesPerToken != start {
+		t.Fatalf("bytesPerToken = %v, want it unchanged by absent counts", a.bytesPerToken)
+	}
+}
+
+func TestBudgetAccountsForSchemas(t *testing.T) {
+	isolate(t)
+	a := New(&fakeChatter{}, DefaultOptions())
+	withSchemas := a.historyBytes()
+	a.schemas = nil
+	without := a.historyBytes()
+
+	// Schemas are sent on every request and are large enough to matter; an
+	// estimate that ignored them would under-count every call.
+	if withSchemas <= without {
+		t.Fatalf("historyBytes = %d with schemas, %d without, want schemas counted",
+			withSchemas, without)
+	}
+}
+
+func TestBudgetLeavesRoomyTurnsAlone(t *testing.T) {
+	isolate(t)
+	opts := DefaultOptions()
+	opts.MaxPromptTokens = 1_000_000 // far above anything here
+	a := New(&fakeChatter{}, opts)
+	a.messages = append(a.messages, bigSlice("a.go", 50))
+
+	if got := a.enforceBudget(); got != "" {
+		t.Fatalf("enforceBudget() = %q, want a turn well inside its ceiling untouched", got)
+	}
+	// Economising early would spend the budget's headroom for nothing.
+	if strings.Contains(a.messages[1].Content, "redacted") {
+		t.Fatal("enforceBudget() shed context that the ceiling did not require")
+	}
+}
+
+func TestBudgetDropsOldExchangesWhenSheddingSlicesIsNotEnough(t *testing.T) {
+	isolate(t)
+	opts := DefaultOptions()
+	a := New(&fakeChatter{}, opts)
+	// Bulk that compaction cannot touch: plain conversation, not file slices.
+	for i := 0; i < 40; i++ {
+		a.messages = append(a.messages, llm.Message{
+			Role: "user", Content: strings.Repeat("y", 400) + strconv.Itoa(i),
+		})
+	}
+	full := a.estimatePromptTokens()
+	// A ceiling reachable by trimming, but not by compaction alone.
+	a.opts.MaxPromptTokens = full / 2
+
+	stop := a.enforceBudget()
+
+	if stop != "" {
+		t.Fatalf("enforceBudget() = %q, want trimming to make room", stop)
+	}
+	if a.estimatePromptTokens() >= a.opts.MaxPromptTokens {
+		t.Fatalf("estimate %d still over the ceiling %d",
+			a.estimatePromptTokens(), a.opts.MaxPromptTokens)
+	}
+	// The gap must be stated, not silent.
+	var sawNote bool
+	for _, m := range a.messages {
+		sawNote = sawNote || strings.Contains(m.Content, "earlier messages elided")
+	}
+	if !sawNote {
+		t.Fatalf("history = %+v, want the elision note", a.messages)
+	}
+}
+
+func TestHistoryBytesIsNeverZero(t *testing.T) {
+	// calibrate divides by this, and the ratio it produces feeds every later
+	// estimate. A zero here would poison the ceiling permanently.
+	if got := (&Agent{}).historyBytes(); got <= 0 {
+		t.Fatalf("historyBytes() = %d for a zero Agent, want the schemas to count for something", got)
+	}
+}
+
+func TestBudgetAccessors(t *testing.T) {
+	isolate(t)
+	a := New(&fakeChatter{}, DefaultOptions())
+
+	if a.MaxPromptTokens() != 0 {
+		t.Fatalf("MaxPromptTokens() = %d, want no ceiling by default", a.MaxPromptTokens())
+	}
+	a.SetMaxPromptTokens(5000)
+	if a.MaxPromptTokens() != 5000 {
+		t.Fatalf("MaxPromptTokens() = %d, want the ceiling set", a.MaxPromptTokens())
+	}
+	// The estimate is what the ceiling is compared against, so an operator has
+	// to be able to see it.
+	if a.EstimatedPromptTokens() <= 0 {
+		t.Fatalf("EstimatedPromptTokens() = %d, want the seeded history counted",
+			a.EstimatedPromptTokens())
 	}
 }

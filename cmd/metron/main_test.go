@@ -54,6 +54,8 @@ type fakeStepper struct {
 	advertised  []string
 	schemaBytes int
 	tools       []agent.ToolRun
+	ceiling     int
+	estimate    int
 	messages    []llm.Message
 	restored    bool
 }
@@ -74,6 +76,9 @@ func (f *fakeStepper) LastUsage() (llm.Usage, int) { return f.usage, f.calls }
 
 func (f *fakeStepper) AdvertisedTools() ([]string, int) { return f.advertised, f.schemaBytes }
 func (f *fakeStepper) LastTools() []agent.ToolRun       { return f.tools }
+func (f *fakeStepper) SetMaxPromptTokens(n int)         { f.ceiling = n }
+func (f *fakeStepper) MaxPromptTokens() int             { return f.ceiling }
+func (f *fakeStepper) EstimatedPromptTokens() int       { return f.estimate }
 func (f *fakeStepper) Messages() []llm.Message          { return f.messages }
 func (f *fakeStepper) Restore(m []llm.Message)          { f.messages = m; f.restored = true }
 
@@ -536,6 +541,9 @@ func (contextStepper) Reset()                                             {}
 func (contextStepper) HistorySize() (int, int)                            { return 0, 0 }
 func (contextStepper) LastUsage() (llm.Usage, int)                        { return llm.Usage{}, 0 }
 func (contextStepper) LastTools() []agent.ToolRun                         { return nil }
+func (contextStepper) SetMaxPromptTokens(int)                             {}
+func (contextStepper) MaxPromptTokens() int                               { return 0 }
+func (contextStepper) EstimatedPromptTokens() int                         { return 0 }
 func (contextStepper) Messages() []llm.Message                            { return nil }
 func (contextStepper) Restore([]llm.Message)                              {}
 func (contextStepper) AdvertisedTools() ([]string, int)                   { return nil, 0 }
@@ -560,6 +568,9 @@ func (signallingStepper) Reset()                           {}
 func (signallingStepper) HistorySize() (int, int)          { return 0, 0 }
 func (signallingStepper) LastUsage() (llm.Usage, int)      { return llm.Usage{}, 0 }
 func (signallingStepper) LastTools() []agent.ToolRun       { return nil }
+func (signallingStepper) SetMaxPromptTokens(int)           {}
+func (signallingStepper) MaxPromptTokens() int             { return 0 }
+func (signallingStepper) EstimatedPromptTokens() int       { return 0 }
 func (signallingStepper) Messages() []llm.Message          { return nil }
 func (signallingStepper) Restore([]llm.Message)            {}
 func (signallingStepper) AdvertisedTools() ([]string, int) { return nil, 0 }
@@ -1476,5 +1487,54 @@ func TestRunMainTalksToAnOpenAIEndpoint(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "from openai") {
 		t.Fatalf("stdout = %q, want the OpenAI-format answer", out.String())
+	}
+}
+
+func TestBudgetCommand(t *testing.T) {
+	bot := &fakeStepper{estimate: 1234}
+	cfg := config.Defaults()
+
+	var out bytes.Buffer
+	command(&out, "/budget", cfg, "", testEnv(t), bot, testRecorder(t))
+	if !strings.Contains(out.String(), "No per-turn ceiling") || !strings.Contains(out.String(), "1234") {
+		t.Fatalf("/budget = %q, want the absent ceiling and the estimate", out.String())
+	}
+
+	out.Reset()
+	command(&out, "/budget 8000", cfg, "", testEnv(t), bot, testRecorder(t))
+	if bot.ceiling != 8000 || !strings.Contains(out.String(), "8000") {
+		t.Fatalf("/budget 8000 = %q, ceiling = %d", out.String(), bot.ceiling)
+	}
+
+	out.Reset()
+	command(&out, "/budget", cfg, "", testEnv(t), bot, testRecorder(t))
+	// The estimate is shown because the ceiling is enforced against it, not
+	// against a number the server has yet to report.
+	if !strings.Contains(out.String(), "8000") || !strings.Contains(out.String(), "1234") {
+		t.Fatalf("/budget = %q, want both the ceiling and the estimate", out.String())
+	}
+
+	out.Reset()
+	command(&out, "/budget off", cfg, "", testEnv(t), bot, testRecorder(t))
+	if bot.ceiling != 0 || !strings.Contains(out.String(), "lifted") {
+		t.Fatalf("/budget off = %q, ceiling = %d", out.String(), bot.ceiling)
+	}
+
+	out.Reset()
+	command(&out, "/budget 0", cfg, "", testEnv(t), bot, testRecorder(t))
+	if bot.ceiling != 0 || !strings.Contains(out.String(), "lifted") {
+		t.Fatalf("/budget 0 = %q, want zero to lift the ceiling", out.String())
+	}
+
+	out.Reset()
+	command(&out, "/budget lots", cfg, "", testEnv(t), bot, testRecorder(t))
+	if !strings.Contains(out.String(), "Not a token count") {
+		t.Fatalf("/budget lots = %q, want a usable complaint", out.String())
+	}
+
+	out.Reset()
+	command(&out, "/budget -5", cfg, "", testEnv(t), bot, testRecorder(t))
+	if !strings.Contains(out.String(), "Not a token count") {
+		t.Fatalf("/budget -5 = %q, want a negative ceiling refused", out.String())
 	}
 }
