@@ -261,3 +261,70 @@ func TestUnavailableToolsDefaultsToDiffForAZeroEnv(t *testing.T) {
 		t.Fatalf("apply_patch withheld as %q; an empty EditFormat should mean diff", reason)
 	}
 }
+
+// bsdCtagsShim stands in for the ctags Apple ships: on PATH, failing the
+// version check, and rejecting the field flags EnsureTags needs.
+const bsdCtagsShim = "echo 'ctags: illegal option -- -' >&2\nexit 1\n"
+
+func TestPreflightKeepsFindSymbolWhenTheGoIndexCanCover(t *testing.T) {
+	workdir(t)
+	writeFile(t, "main.go", "package main\n\nfunc main() {}\n")
+	shimDir(t, map[string]string{
+		"rg":    "exit 0\n",
+		"git":   gitRepoShim,
+		"ctags": bsdCtagsShim,
+	})
+
+	got := defaultEnv(t).Preflight()
+	if len(got) != 1 {
+		t.Fatalf("Preflight() = %v, want exactly the degraded-index note", got)
+	}
+	// The operator is told the index narrowed, not that a tool is gone -- and
+	// the note must not claim find_symbol is unavailable, because it is not.
+	for _, want := range []string{"not Universal Ctags", "built-in index", "Go only"} {
+		if !strings.Contains(got[0], want) {
+			t.Errorf("Preflight() = %q, want it to mention %q", got[0], want)
+		}
+	}
+	if strings.Contains(got[0], "find_symbol is unavailable") {
+		t.Errorf("Preflight() = %q, want find_symbol reported as working", got[0])
+	}
+}
+
+func TestUnavailableToolsOffersFindSymbolOnAStockMac(t *testing.T) {
+	workdir(t)
+	writeFile(t, "main.go", "package main\n\nfunc main() {}\n")
+	// The stock macOS state: BSD ctags, and a Go project to index.
+	shimDir(t, map[string]string{"ctags": bsdCtagsShim})
+
+	if _, withheld := defaultEnv(t).UnavailableTools()[ToolFindSymbol]; withheld {
+		t.Fatal("find_symbol was withheld even though the built-in Go index can answer")
+	}
+}
+
+func TestUnavailableToolsOffersFindSymbolWithAnIndexOnDisk(t *testing.T) {
+	workdir(t)
+	writeFile(t, ".tags", sampleTags)
+	shimDir(t, nil) // ctags is gone, its index is not
+
+	if _, withheld := defaultEnv(t).UnavailableTools()[ToolFindSymbol]; withheld {
+		t.Fatal("find_symbol was withheld even though an index is already on disk")
+	}
+}
+
+func TestRebuildTagsDropsTheIndexWhenTheGoFallbackIsInUse(t *testing.T) {
+	workdir(t)
+	writeFile(t, ".tags", "stale content\n")
+	writeFile(t, "main.go", "package main\n\nfunc main() {}\n")
+	shimDir(t, map[string]string{"ctags": bsdCtagsShim})
+
+	// There is no ctags index to rebuild, and the built-in one is rebuilt on
+	// every lookup. Dropping the stale file is the whole job, and reporting the
+	// missing ctags as a failure would call a working tool broken.
+	if err := defaultEnv(t).RebuildTags(); err != nil {
+		t.Fatalf("RebuildTags() error = %v, want the Go fallback to make this a no-op", err)
+	}
+	if fileExists(".tags") {
+		t.Fatal(".tags survived RebuildTags")
+	}
+}
