@@ -77,6 +77,48 @@ func TestEnsureTagsReturnsErrorWhenCtagsUnavailable(t *testing.T) {
 	}
 }
 
+func TestEnsureTagsRetriesWithoutTheEndField(t *testing.T) {
+	workdir(t)
+	// A Universal Ctags too old for --fields=+e rejects the whole invocation.
+	// The retry without it is what keeps find_symbol working there.
+	shimDir(t, map[string]string{
+		"ctags": `for arg in "$@"; do
+  case "$arg" in
+    *+neK*) echo "Unknown field letter: e" >&2; exit 1;;
+  esac
+done
+while [ $# -gt 0 ]; do
+  if [ "$1" = "-f" ]; then shift; out="$1"; fi
+  shift
+done
+printf 'Sym\tmain.go\t/^Sym$/;"\tkind:func\tline:3\n' > "$out"
+`,
+	})
+
+	if err := defaultEnv(t).EnsureTags(); err != nil {
+		t.Fatalf("EnsureTags() = %v, want the retry to succeed", err)
+	}
+	if !fileExists(".tags") {
+		t.Fatal("no index was written by the retry")
+	}
+}
+
+func TestEnsureTagsDiscardsAStubFromAFailedRun(t *testing.T) {
+	dir := workdir(t)
+	// A ctags that creates the index file and then fails leaves a stub behind,
+	// which every later call would take for a usable index.
+	shimDir(t, map[string]string{
+		"ctags": "touch " + dir + "/.tags\nexit 1\n",
+	})
+
+	if err := defaultEnv(t).EnsureTags(); err == nil {
+		t.Fatal("EnsureTags() = nil, want the failure reported")
+	}
+	if fileExists(".tags") {
+		t.Fatal(".tags survived a failed run and would be trusted next time")
+	}
+}
+
 func TestEnsureTagsExplainsIncompatibleCtags(t *testing.T) {
 	workdir(t)
 	// BSD ctags: present, but it rejects the flags EnsureTags relies on.
@@ -96,13 +138,117 @@ func TestEnsureTagsExplainsIncompatibleCtags(t *testing.T) {
 	}
 }
 
-func TestFindSymbolReportsCtagsFailure(t *testing.T) {
+func TestFindSymbolReportsThatNoIndexCanBeBuilt(t *testing.T) {
 	workdir(t)
 	shimDir(t, nil)
+
+	// No ctags, no Go source: nothing can answer, and the message has to tell
+	// the model so rather than let it retry the tool for the rest of the turn.
+	_, err := defaultEnv(t).FindSymbol("Agent")
+	if err == nil {
+		t.Fatal("FindSymbol() = nil error, want a refusal when no index is possible")
+	}
+	for _, want := range []string{"no symbol index is available", "Do not retry", "search_text"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("FindSymbol() error = %v, want it to mention %q", err, want)
+		}
+	}
+}
+
+func TestFindSymbolReportsCtagsFailureWhenNoFallbackExists(t *testing.T) {
+	workdir(t)
+	// ctags is present and claims to be Universal, so it is chosen -- and then
+	// fails. With no Go source to fall back on, the failure is the answer.
+	shimDir(t, map[string]string{
+		"ctags": `case "$1" in
+  --version) echo "Universal Ctags 6.1.0"; exit 0;;
+esac
+echo "boom" >&2
+exit 2
+`,
+	})
 
 	_, err := defaultEnv(t).FindSymbol("Agent")
 	if err == nil || !strings.Contains(err.Error(), "failed generating ctags") {
 		t.Fatalf("FindSymbol() error = %v, want it to wrap the ctags failure", err)
+	}
+}
+
+func TestFindSymbolFallsBackToTheGoIndex(t *testing.T) {
+	workdir(t)
+	writeFile(t, "greet.go", "package greet\n\nfunc Greet() string {\n\treturn \"hi\"\n}\n")
+	// BSD ctags: on PATH, and unusable. This is the stock macOS state, and the
+	// one the built-in index exists for.
+	shimDir(t, map[string]string{
+		"ctags": "echo 'ctags: illegal option -- -' >&2\nexit 1\n",
+	})
+
+	got, err := defaultEnv(t).FindSymbol("Greet")
+	if err != nil {
+		t.Fatalf("FindSymbol() error = %v, want the Go index to answer", err)
+	}
+	if got != "Greet [func] -> greet.go:3-5" {
+		t.Fatalf("FindSymbol() = %q, want the built-in index result", got)
+	}
+	if fileExists(".tags") {
+		t.Error("a .tags file was written by the fallback path")
+	}
+}
+
+func TestFindSymbolFallsBackWhenCtagsBreaksMidRun(t *testing.T) {
+	workdir(t)
+	writeFile(t, "greet.go", "package greet\n\nfunc Greet() {}\n")
+	// A ctags that passes the version check and then fails is not a refusal:
+	// the Go index answers the same question.
+	shimDir(t, map[string]string{
+		"ctags": `case "$1" in
+  --version) echo "Universal Ctags 6.1.0"; exit 0;;
+esac
+exit 2
+`,
+	})
+
+	got, err := defaultEnv(t).FindSymbol("Greet")
+	if err != nil {
+		t.Fatalf("FindSymbol() error = %v", err)
+	}
+	if !strings.Contains(got, "greet.go:3") {
+		t.Fatalf("FindSymbol() = %q, want the Go index to have answered", got)
+	}
+}
+
+func TestFindSymbolPrefersAnExistingIndexOverTheGoFallback(t *testing.T) {
+	workdir(t)
+	writeFile(t, ".tags", sampleTags)
+	writeFile(t, "other.go", "package other\n\nfunc Step() {}\n")
+	shimDir(t, nil) // ctags is gone; the index it left behind is not
+
+	got, err := defaultEnv(t).FindSymbol("Step")
+	if err != nil {
+		t.Fatalf("FindSymbol() error = %v", err)
+	}
+	if !strings.Contains(got, "loop.go:36") {
+		t.Fatalf("FindSymbol() = %q, want the existing index used", got)
+	}
+}
+
+func TestFindSymbolReportsSpansFromTheEndField(t *testing.T) {
+	workdir(t)
+	writeFile(t, ".tags",
+		"Wide	wide.go	/^func Wide$/;\"	kind:func	line:10	end:24\n"+
+			"Thin	wide.go	/^var Thin$/;\"	kind:var	line:30	end:30\n")
+	writeFile(t, "wide.go", "x\n")
+
+	got, err := defaultEnv(t).FindSymbol("Wide")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "Wide [func] -> wide.go:10-24" {
+		t.Fatalf("FindSymbol() = %q, want the span from the end: field", got)
+	}
+	// end == line is one line, and a range would be noise.
+	if got, _ := defaultEnv(t).FindSymbol("Thin"); got != "Thin [var] -> wide.go:30" {
+		t.Fatalf("FindSymbol() = %q, want a single-line symbol collapsed", got)
 	}
 }
 

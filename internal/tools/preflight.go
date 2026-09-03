@@ -45,12 +45,16 @@ type Dependency struct {
 	Hint   string
 }
 
+// ctagsHint is named rather than inlined because two places print it: the
+// dependency table below, and the degraded-index note in Preflight.
+const ctagsHint = "install Universal Ctags (brew install universal-ctags)"
+
 // dependencies is the full set of external programs metron shells out to.
 // view_slice is absent on purpose: it reads files directly, so it is the one
 // tool that is always available.
 var dependencies = []Dependency{
 	{Binary: "rg", Tools: []string{ToolListFiles, ToolSearchText}, Hint: "install ripgrep (brew install ripgrep)"},
-	{Binary: "ctags", Tools: []string{ToolFindSymbol}, Hint: "install Universal Ctags (brew install universal-ctags)"},
+	{Binary: "ctags", Tools: []string{ToolFindSymbol}, Hint: ctagsHint},
 	{Binary: "git", Tools: []string{ToolApplyPatch}, Hint: "install git"},
 }
 
@@ -68,10 +72,15 @@ func (e Env) problems() []problem {
 	for _, dep := range dependencies {
 		var reason string
 		switch {
+		case dep.Binary == "ctags":
+			// A broken ctags costs find_symbol nothing when metron can index
+			// the project itself, which on a Go project it can. Reporting it
+			// here would withdraw a tool that works.
+			if reason = ctagsFault(); reason == "" || e.canIndexSymbols() {
+				continue
+			}
 		case !onPath(dep.Binary):
 			reason = fmt.Sprintf("%s not found on PATH", dep.Binary)
-		case dep.Binary == "ctags" && !isUniversalCtags():
-			reason = "ctags on PATH is not Universal Ctags"
 		case dep.Binary == "git" && !e.insideWorkTree():
 			reason = "the project is not a git repository"
 		default:
@@ -80,6 +89,13 @@ func (e Env) problems() []problem {
 		found = append(found, problem{dep: dep, reason: reason})
 	}
 	return found
+}
+
+// canIndexSymbols reports whether find_symbol can answer without a working
+// ctags: from an index a previous run left behind, or from Go source the
+// built-in parser reads directly.
+func (e Env) canIndexSymbols() bool {
+	return e.tagsExist() || e.hasGoSources()
 }
 
 // Preflight returns one human-readable warning per problem found. An empty
@@ -95,6 +111,15 @@ func (e Env) Preflight() []string {
 		}
 		warnings = append(warnings, fmt.Sprintf("%s - %s (%s)",
 			p.reason, unavailablePhrase(p.dep.Tools), hint))
+	}
+	// Not a problem: find_symbol still runs. It is still worth saying, because
+	// the operator is one index short of what they think they have -- the
+	// built-in one reads Go and nothing else, so on a mixed repository the
+	// answer silently narrows.
+	if fault := ctagsFault(); fault != "" && e.canIndexSymbols() {
+		warnings = append(warnings, fmt.Sprintf(
+			"%s - find_symbol is falling back to metron's built-in index, which covers Go only (%s)",
+			fault, ctagsHint))
 	}
 	return warnings
 }
@@ -142,15 +167,19 @@ func onPath(binary string) bool {
 	return err == nil
 }
 
-// isUniversalCtags reports whether the ctags on PATH is Universal Ctags. The
-// BSD ctags shipped with macOS does not understand the --fields=+nK flag
-// EnsureTags relies on, and fails this check.
-func isUniversalCtags() bool {
-	out, err := exec.Command("ctags", "--version").CombinedOutput()
-	if err != nil {
-		return false
+// ctagsFault reports why the ctags on PATH cannot build metron's index, or ""
+// if it can. The BSD ctags shipped with macOS is the case this exists for: it
+// is present, it is on PATH, and it rejects the field flags EnsureTags relies
+// on -- which is why a plain LookPath is not the test.
+func ctagsFault() string {
+	if !onPath("ctags") {
+		return "ctags not found on PATH"
 	}
-	return strings.Contains(string(out), "Universal Ctags")
+	out, err := exec.Command("ctags", "--version").CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "Universal Ctags") {
+		return "ctags on PATH is not Universal Ctags"
+	}
+	return ""
 }
 
 // insideWorkTree reports whether the project is inside a git repository. Having
@@ -173,6 +202,13 @@ func (e Env) insideWorkTree() bool {
 func (e Env) RebuildTags() error {
 	if err := os.Remove(e.tagsFile()); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove stale index: %w", err)
+	}
+	// With no usable ctags the answers come from the built-in Go index, which
+	// is rebuilt on every lookup and so has nothing to invalidate. Dropping the
+	// stale file above was the whole job; reporting the absent ctags as a
+	// failure would be reporting a tool that works as broken.
+	if ctagsFault() != "" && e.hasGoSources() {
+		return nil
 	}
 	if err := e.EnsureTags(); err != nil {
 		return fmt.Errorf("rebuild ctags index: %w", err)
