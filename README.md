@@ -1,5 +1,9 @@
 # metron
 
+[![CI](https://github.com/mdabydeen/metron/actions/workflows/ci.yml/badge.svg)](https://github.com/mdabydeen/metron/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/mdabydeen/metron.svg)](https://pkg.go.dev/github.com/mdabydeen/metron)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+
 A minimal, terminal-based coding agent that talks to a **local** [Ollama](https://ollama.com)
 model. Its one defining constraint is **token discipline**: the model never reads a whole
 file. Every look at your code goes through a narrow, budgeted tool, and large tool output is
@@ -431,3 +435,20 @@ and not to retry, it tried once, fell back to `view_slice`, and finished the job
 - Trimming history drops the oldest exchanges silently; the model is not told that earlier
   context is gone.
 - Conversation history is lost when you exit.
+
+Two of these — automatic `.tags` invalidation and silent history trimming — are being
+addressed. See [CHANGELOG.md](CHANGELOG.md) for what has landed.
+
+## Contributing
+
+Bug reports and pull requests are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) first:
+metron is small on purpose, and the constraints there are what a PR is judged against.
+Participation is governed by the [Code of Conduct](CODE_OF_CONDUCT.md).
+
+Security issues go through [SECURITY.md](SECURITY.md), not the public tracker. That file
+also documents what metron actually does to your working tree, which is worth reading
+before you point it at a repository.
+
+## License
+
+[Apache-2.0](LICENSE). Copyright 2026 Mike Dabydeen.
