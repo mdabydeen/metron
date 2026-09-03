@@ -1,0 +1,100 @@
+# GoReleaser builds the binaries published on each tag.
+#
+# CGO stays off on purpose: metron has no cgo dependencies today, and keeping it
+# that way is what makes cross-compiling four platforms from one runner trivial.
+# Anything that would require cgo -- tree-sitter bindings, for instance -- has to
+# be weighed against losing this.
+#
+# `goreleaser check` runs in CI on every PR, and a snapshot build is exercised
+# there too, so a broken config fails before a tag rather than during a release.
+version: 2
+
+project_name: metron
+
+before:
+  hooks:
+    - go mod tidy
+    - go test ./...
+
+builds:
+  - id: metron
+    main: ./cmd/metron
+    binary: metron
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    # Matches the Makefile's stamp, so a released binary and a local `make build`
+    # report versions in the same shape.
+    ldflags:
+      - -s -w -X main.version={{ .Tag }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: metron
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - LICENSE
+      - NOTICE
+      - README.md
+      - CHANGELOG.md
+      - metron.example.json
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot"
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - Merge pull request
+      - Merge branch
+
+release:
+  draft: false
+  prerelease: auto
+  footer: |
+    ## Install
+
+    ```bash
+    brew install mdabydeen/tap/metron
+    ```
+
+    or
+
+    ```bash
+    go install github.com/mdabydeen/metron/cmd/metron@{{ .Tag }}
+    ```
+
+    metron needs `rg`, Universal Ctags and `git` on PATH, plus a reachable Ollama
+    server with a tool-capable model. It warns at startup about anything missing.
+
+brews:
+  - name: metron
+    repository:
+      owner: mdabydeen
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Formula
+    homepage: https://github.com/mdabydeen/metron
+    description: A context-disciplined terminal coding agent for local models
+    license: Apache-2.0
+    dependencies:
+      - name: ripgrep
+      - name: universal-ctags
+      - name: git
+    test: |
+      assert_match "metron", shell_output("#{bin}/metron --version")

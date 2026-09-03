@@ -18,6 +18,9 @@ make race                                          # go test -race -count=1 ./..
 make cover                                         # coverage profile + total
 make vet                                           # go vet ./...
 make check                                         # vet + test + race + cover
+make lint                                          # golangci-lint (needs it on PATH)
+make release-check                                 # validate .goreleaser.yaml
+make release-snapshot                              # cross-platform build, no tag
 make docker-test                                   # + integration tests, real rg/ctags/git
 make test-live                                     # + a real model on the local Ollama
 ```

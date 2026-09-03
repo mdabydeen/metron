@@ -1,0 +1,40 @@
+# Deliberately conservative. Every linter here is one this codebase already
+# passes, so a red lint job means a real regression rather than a backlog
+# someone has learned to ignore.
+#
+# Three more are wanted and not yet enabled, because each needs its exclusions
+# calibrated against metron's design by someone who can run it locally first:
+#
+#   errcheck  -- the REPL makes many unchecked fmt.Fprintf calls to an io.Writer.
+#                Checking them all is noise; excluding them wholesale is too
+#                broad. Needs a considered exclude-functions list.
+#   gosec     -- will flag G204 (subprocess with a variable argument) and G304
+#                (file opened from a variable). Both are metron's entire design:
+#                it shells out to rg/ctags/git with model-supplied arguments, and
+#                view_slice opens a model-supplied path. Enable once filesystem
+#                confinement lands, so the exclusions document a real boundary
+#                rather than waving the warning away.
+#   revive    -- its default set includes `exported`, which several tool
+#                functions would fail on for want of doc comments. Worth doing;
+#                it is a docs change, not a lint change.
+version: "2"
+
+linters:
+  enable:
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - misspell
+
+  exclusions:
+    rules:
+      # Test helpers shim external binaries by writing shell scripts into a
+      # temp PATH; the constructed strings are the point.
+      - path: _test\.go
+        linters:
+          - misspell
+
+formatters:
+  enable:
+    - gofmt

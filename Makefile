@@ -3,8 +3,9 @@ INSTALL_PATH=/usr/local/bin
 COVERPROFILE=coverage.out
 DOCKER_IMAGE=metron-test
 
-.PHONY: build install test race cover vet fmt check \
-        docker-build docker-test docker-race docker-cover test-live clean
+.PHONY: build install test race cover vet fmt lint check \
+        docker-build docker-test docker-race docker-cover test-live \
+        release-check release-snapshot clean
 
 # ---------------------------------------------------------------- build ----
 
@@ -36,7 +37,21 @@ vet:
 fmt:
 	gofmt -l -w .
 
+# Needs golangci-lint on PATH; CI runs this too.
+lint:
+	golangci-lint run
+
 check: vet test race cover
+
+# ---------------------------------------------------------- release -------
+# Both need goreleaser on PATH. CI runs them on every PR, so a broken release
+# config fails there rather than at tag time.
+
+release-check:
+	goreleaser check
+
+release-snapshot:
+	goreleaser build --snapshot --clean
 
 # ----------------------------------------------------- tests (docker) ------
 # Adds the `integration` tests, which need real ripgrep, Universal Ctags and
@@ -64,4 +79,4 @@ test-live:
 	go test -tags=live -run Live -v -timeout 30m ./cmd/metron
 
 clean:
-	rm -rf bin/ .tags $(COVERPROFILE)
+	rm -rf bin/ dist/ .tags $(COVERPROFILE)
