@@ -13,10 +13,10 @@ import (
 	"strings"
 	"time"
 
-	"metron/internal/agent"
-	"metron/internal/config"
-	"metron/internal/ollama"
-	"metron/internal/tools"
+	"github.com/mdabydeen/metron/internal/agent"
+	"github.com/mdabydeen/metron/internal/config"
+	"github.com/mdabydeen/metron/internal/ollama"
+	"github.com/mdabydeen/metron/internal/tools"
 )
 
 const helpText = `Commands:

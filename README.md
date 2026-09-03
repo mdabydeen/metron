@@ -63,10 +63,19 @@ The test suite needs none of these — see [Testing](#testing).
 ## Install
 
 ```bash
+go install github.com/mdabydeen/metron/cmd/metron@latest
+```
+
+Or build from a clone:
+
+```bash
 make build            # -> bin/metron
 make install          # build, then sudo cp to /usr/local/bin
-go run main.go        # run without building
+go run ./cmd/metron   # run without building
 ```
+
+`go install` does not stamp a version, so `metron --version` reports `dev` for those builds.
+Released binaries and `make build` both carry the real one.
 
 ## Usage
 
@@ -263,7 +272,7 @@ error, since that is an environment fault rather than a bad patch.
 ## Architecture
 
 ```
-main.go              REPL and commands. No conversation state lives here.
+cmd/metron/main.go   REPL and commands. No conversation state lives here.
 internal/config      Settings: defaults, JSON file, environment, validation.
 internal/ollama      HTTP client for Ollama's /api/chat, plus the shared wire types.
 internal/agent       The agent loop, the system prompt, tool schemas, compaction.

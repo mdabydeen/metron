@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"strings"
 
-	"metron/internal/ollama"
-	"metron/internal/tools"
+	"github.com/mdabydeen/metron/internal/ollama"
+	"github.com/mdabydeen/metron/internal/tools"
 )
 
 // Options bounds the agent loop and the tool budgets it enforces.

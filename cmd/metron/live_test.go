@@ -23,9 +23,9 @@ import (
 	"testing"
 	"time"
 
-	"metron/internal/agent"
-	"metron/internal/config"
-	"metron/internal/ollama"
+	"github.com/mdabydeen/metron/internal/agent"
+	"github.com/mdabydeen/metron/internal/config"
+	"github.com/mdabydeen/metron/internal/ollama"
 )
 
 // liveModel returns a model on the local server that advertises tool support.

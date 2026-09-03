@@ -11,7 +11,7 @@ DOCKER_IMAGE=metron-test
 VERSION?=$(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
 build:
-	go build -ldflags="-s -w -X main.version=$(VERSION)" -o bin/$(BINARY_NAME) main.go
+	go build -ldflags="-s -w -X main.version=$(VERSION)" -o bin/$(BINARY_NAME) ./cmd/metron
 
 install: build
 	sudo cp bin/$(BINARY_NAME) $(INSTALL_PATH)/$(BINARY_NAME)
@@ -61,7 +61,7 @@ docker-cover: docker-build
 # pin a model; otherwise the smallest tool-capable installed model is used.
 
 test-live:
-	go test -tags=live -run Live -v -timeout 30m .
+	go test -tags=live -run Live -v -timeout 30m ./cmd/metron
 
 clean:
 	rm -rf bin/ .tags $(COVERPROFILE)

@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"metron/internal/ollama"
+	"github.com/mdabydeen/metron/internal/ollama"
 )
 
 // fakeChatter replays a scripted sequence of model replies and records the

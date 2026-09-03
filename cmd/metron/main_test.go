@@ -14,8 +14,8 @@ import (
 	"strings"
 	"testing"
 
-	"metron/internal/config"
-	"metron/internal/ollama"
+	"github.com/mdabydeen/metron/internal/config"
+	"github.com/mdabydeen/metron/internal/ollama"
 )
 
 type fakeStepper struct {
@@ -564,7 +564,8 @@ func mustJSONMain(t *testing.T, v any) string {
 // config loading rejects unknown fields, so a key that outlives the struct
 // turns the file metron tells people to copy into a startup error.
 func TestExampleConfigMatchesDefaults(t *testing.T) {
-	path, err := filepath.Abs("metron.example.json")
+	// The example lives at the repository root, two levels above this package.
+	path, err := filepath.Abs(filepath.Join("..", "..", "metron.example.json"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -9,10 +9,10 @@ Metron is a minimal, terminal-based coding agent that talks to a local Ollama mo
 ## Commands
 
 ```bash
-go build -ldflags="-s -w" -o bin/metron main.go   # build (also: make build)
+go build -ldflags="-s -w" -o bin/metron ./cmd/metron  # build (also: make build)
 make install                                       # build + copy to /usr/local/bin (sudo)
 make clean                                         # remove bin/, .tags, coverage.out
-go run main.go                                     # run without building
+go run ./cmd/metron                                # run without building
 make test                                          # go test ./... (hermetic)
 make race                                          # go test -race -count=1 ./...
 make cover                                         # coverage profile + total
@@ -32,7 +32,7 @@ Note for local work on this machine: there is no `rg` binary and `/usr/bin/ctags
 
 Single-binary CLI with three layers:
 
-- **`main.go`** — REPL: `main` reads config from the environment and hands off to `run`, which reads a line at a time, calls `agent.Step` once per input, and prints the reply. `run` takes an `io.Reader`/`io.Writer` and a `stepper` interface so the REPL is testable without stdin or a model. No conversation state lives here.
+- **`cmd/metron/main.go`** — REPL: `main` reads config from the environment and hands off to `run`, which reads a line at a time, calls `agent.Step` once per input, and prints the reply. `run` takes an `io.Reader`/`io.Writer` and a `stepper` interface so the REPL is testable without stdin or a model. No conversation state lives here.
 - **`internal/ollama`** — thin HTTP client (`Client.Chat`) for Ollama's chat API. Defines the wire types (`Message`, `ToolCall`, `Tool`, `ChatRequest`/`ChatResponse`) shared between the agent and the model.
 - **`internal/config`** — settings: `Defaults()`, a JSON file, then environment overrides, then `Validate()`. Resolution order is defaults < file < env; a file that exists but is unreadable, malformed, or has an unknown key is a startup error, never a silent fallback. Every tunable that used to be a magic number lives here.
 - **`internal/agent`** — the agent loop (`Agent.Step`) and the system prompt that establishes the tool-only-access-to-code contract. Owns the persistent `[]ollama.Message` history across turns. `New` takes a `Chatter` interface (the one-method subset of `*ollama.Client`) so the loop can be driven by a fake in tests.
