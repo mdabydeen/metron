@@ -160,6 +160,7 @@ func runMain(args []string, in io.Reader, out, errOut io.Writer) int {
 		MaxTurns:           cfg.MaxTurns,
 		CompactThreshold:   cfg.CompactThreshold,
 		MaxHistoryMessages: cfg.MaxHistoryMessages,
+		RepoMapTokens:      cfg.RepoMapTokens,
 		Env:                env,
 		DisabledTools:      cfg.DisabledTools,
 		Progress:           out,

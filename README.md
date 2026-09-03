@@ -190,6 +190,7 @@ cp metron.example.json .metron.json
 | `num_ctx` | `16384` | context window requested from Ollama |
 | `max_turns` | `10` | model round-trips allowed in one user turn |
 | `compact_threshold_bytes` | `400` | tool output above this size is purged after the turn |
+| `repo_map_tokens` | `0` | tokens for a project map injected once per session; `0` disables it |
 | `max_history_messages` | `60` | messages kept after a turn, excluding the system prompt |
 | `max_slice_lines` | `120` | widest span `view_slice` will read |
 | `max_line_chars` | `500` | longest single line `view_slice` will emit |

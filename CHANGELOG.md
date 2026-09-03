@@ -31,6 +31,16 @@ is pre-1.0, the minor version is bumped for breaking changes to configuration or
   a git repository withdraws `apply_patch`. Their schemas are then not sent at all, and the
   system prompt stops naming them — on a stock Mac that is ~164 fewer prompt tokens on every
   request. A call to an unadvertised tool is refused before it runs.
+- `find_symbol` works without Universal Ctags. metron now carries a pure-Go symbol index
+  (`go/ast`), so on a stock Mac -- where Apple's BSD ctags rejects the flags metron needs --
+  the tool is available rather than withdrawn, on the very language metron is written in.
+  Where Universal Ctags is present it is still used, now with `--fields=+neK` so results
+  report a symbol's *span* (`greet.go:3-7`) rather than only where it starts, which saves the
+  model a guessed `view_slice` range.
+- `repo_map_tokens` injects a ranked structural summary of the project once per session, so
+  the model starts with a picture instead of guessing filenames. Ranked by recent git churn,
+  tie-broken by symbol density. Off by default: it is paid for on every request of the
+  session, and whether the turns it saves outweigh that is the benchmark's question.
 - An OpenAI-compatible provider, selected with `"provider": "openai"`. One wire format
   reaches llama.cpp's server, LM Studio, vLLM, OpenRouter and Ollama's own compatibility
   endpoint, so metron works with whatever you already run. The agent's vocabulary moved to

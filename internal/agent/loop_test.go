@@ -1317,3 +1317,98 @@ func TestSliceHeaderFallsBackWhenThereIsNone(t *testing.T) {
 		t.Fatalf("sliceHeader() = %q, want the neutral description", got)
 	}
 }
+
+func TestRepoMapIsInjectedWhenBudgeted(t *testing.T) {
+	// isolate rather than equipped: the shimmed git answers `ls-files` with
+	// nothing, so discovery would find no files. With no git at all the map
+	// falls back to walking the tree.
+	dir := isolate(t)
+	if err := os.WriteFile(filepath.Join(dir, "widget.go"),
+		[]byte("package main\n\nfunc MakeWidget() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	opts := DefaultOptions()
+	opts.RepoMapTokens = 400
+
+	a := New(&fakeChatter{}, opts)
+
+	if len(a.messages) != 2 {
+		t.Fatalf("seed = %d messages, want the prompt and the map", len(a.messages))
+	}
+	if !strings.Contains(a.messages[1].Content, "widget.go") {
+		t.Fatalf("map = %q, want the project's files", a.messages[1].Content)
+	}
+	// The map is orientation, not a substitute for reading: saying so is what
+	// stops the model treating it as the file contents.
+	if !strings.Contains(a.messages[1].Content, "not a substitute") {
+		t.Fatalf("map = %q, want it framed as orientation", a.messages[1].Content)
+	}
+}
+
+func TestRepoMapIsOffByDefault(t *testing.T) {
+	equipped(t)
+
+	a := New(&fakeChatter{}, DefaultOptions())
+
+	// It costs tokens on every request of the session, so it stays off until
+	// the benchmark says the turns it saves are worth more.
+	if len(a.messages) != 1 {
+		t.Fatalf("seed = %d messages, want only the system prompt", len(a.messages))
+	}
+}
+
+func TestResetRebuildsTheRepoMap(t *testing.T) {
+	// isolate rather than equipped: the shimmed git answers `ls-files` with
+	// nothing, so discovery would find no files. With no git at all the map
+	// falls back to walking the tree.
+	dir := isolate(t)
+	if err := os.WriteFile(filepath.Join(dir, "one.go"),
+		[]byte("package main\n\nfunc One() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	opts := DefaultOptions()
+	opts.RepoMapTokens = 400
+	a := New(&fakeChatter{}, opts)
+
+	// A file appears after the session started.
+	if err := os.WriteFile(filepath.Join(dir, "two.go"),
+		[]byte("package main\n\nfunc Two() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a.Reset()
+
+	// The map is rebuilt against the tree as it is now, which is the point of
+	// keeping it out of the system prompt.
+	if !strings.Contains(a.messages[1].Content, "two.go") {
+		t.Fatalf("map = %q, want it rebuilt on reset", a.messages[1].Content)
+	}
+}
+
+func TestTrimHistoryKeepsTheRepoMap(t *testing.T) {
+	// isolate rather than equipped: the shimmed git answers `ls-files` with
+	// nothing, so discovery would find no files. With no git at all the map
+	// falls back to walking the tree.
+	dir := isolate(t)
+	if err := os.WriteFile(filepath.Join(dir, "widget.go"),
+		[]byte("package main\n\nfunc MakeWidget() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	opts := DefaultOptions()
+	opts.RepoMapTokens = 400
+	opts.MaxHistoryMessages = 2
+	a := New(&fakeChatter{}, opts)
+	for i := 0; i < 10; i++ {
+		a.messages = append(a.messages, llm.Message{Role: "user", Content: strconv.Itoa(i)})
+	}
+
+	a.trimHistory()
+
+	// The map is structural, not conversational: trimming it away would leave
+	// the model without the orientation it was given and no way to ask for it.
+	if !strings.Contains(a.messages[1].Content, "widget.go") {
+		t.Fatalf("history = %+v, want the repo map kept", a.messages)
+	}
+	if a.messages[0].Role != "system" {
+		t.Fatalf("history[0] = %+v, want the system prompt kept", a.messages[0])
+	}
+}

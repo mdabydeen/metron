@@ -531,3 +531,18 @@ func TestAPIKeyComesFromTheEnvironmentNotTheFile(t *testing.T) {
 		t.Fatalf("APIKey() = %q, want it read from the environment", got)
 	}
 }
+
+func TestValidateRejectsANegativeRepoMapBudget(t *testing.T) {
+	cfg := Defaults()
+	cfg.RepoMapTokens = -1
+
+	// Zero is meaningful here -- it disables the map -- so this is the one
+	// budget that may be zero but not negative.
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "repo_map_tokens") {
+		t.Fatalf("Validate() error = %v, want a negative budget rejected", err)
+	}
+	cfg.RepoMapTokens = 0
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() = %v, want zero accepted as 'disabled'", err)
+	}
+}

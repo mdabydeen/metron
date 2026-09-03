@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/mdabydeen/metron/internal/llm"
+	"github.com/mdabydeen/metron/internal/repomap"
 	"github.com/mdabydeen/metron/internal/tools"
 )
 
@@ -23,6 +24,12 @@ type Options struct {
 	// and the budgets they enforce. A zero Root is resolved at New, so a caller
 	// that only cares about the loop can leave it alone.
 	Env tools.Env
+
+	// RepoMapTokens budgets a structural summary of the project, injected once
+	// per session. Zero disables it. It is paid for on every request of the
+	// session, so it defaults off until the benchmark says the turns it saves
+	// are worth more than the tokens it costs.
+	RepoMapTokens int
 
 	// DisabledTools are tools the operator has switched off. They are not
 	// advertised and cannot be called, which also removes their schemas from
@@ -126,14 +133,36 @@ func New(client Chatter, opts Options) *Agent {
 	for _, name := range advertised {
 		schemas = append(schemas, describeTool(name, opts.Env))
 	}
-	return &Agent{
+	a := &Agent{
 		client:      client,
 		opts:        opts,
 		advertised:  advertised,
 		schemas:     schemas,
 		unavailable: unavailable,
-		messages:    []llm.Message{{Role: "system", Content: systemPrompt(advertised)}},
 	}
+	a.messages = a.seed()
+	return a
+}
+
+// seed builds the opening history: the system prompt, and the repo map when one
+// is budgeted.
+//
+// The map is a separate message rather than part of the prompt so /reset and
+// Restore rebuild it against the tree as it is now, not as it was when the
+// session started.
+func (a *Agent) seed() []llm.Message {
+	msgs := []llm.Message{{Role: "system", Content: systemPrompt(a.advertised)}}
+	if a.opts.RepoMapTokens <= 0 {
+		return msgs
+	}
+	if m := repomap.Build(a.opts.Env.Root, a.opts.RepoMapTokens); m != "" {
+		msgs = append(msgs, llm.Message{
+			Role: "system",
+			Content: "A map of this project, for orientation only. It is not a substitute " +
+				"for reading code: use the tools before changing anything.\n" + m,
+		})
+	}
+	return msgs
 }
 
 // describeTool returns a tool's schema, specialised to this project where the
@@ -190,7 +219,7 @@ func (a *Agent) AdvertisedTools() (names []string, schemaBytes int) {
 // History is otherwise unbounded, so this is how an operator reclaims the
 // context window without restarting the process.
 func (a *Agent) Reset() {
-	a.messages = []llm.Message{{Role: "system", Content: systemPrompt(a.advertised)}}
+	a.messages = a.seed()
 }
 
 var toolDefs = map[string]llm.Tool{
@@ -498,10 +527,11 @@ func sliceHeader(content string) string {
 // confused by its own absence rather than by a stated gap.
 func (a *Agent) trimHistory() {
 	budget := a.opts.MaxHistoryMessages
-	if budget <= 0 || len(a.messages) == 0 {
+	keep := a.seedLen()
+	if budget <= 0 || len(a.messages) < keep {
 		return
 	}
-	body := a.messages[1:]
+	body := a.messages[keep:]
 	if len(body) <= budget {
 		return
 	}
@@ -511,8 +541,25 @@ func (a *Agent) trimHistory() {
 		dropped = append(dropped, body[0])
 		body = body[1:]
 	}
-	a.messages = append(a.messages[:1:1], elisionNote(dropped))
+	a.messages = append(a.messages[:keep:keep], elisionNote(dropped))
 	a.messages = append(a.messages, body...)
+}
+
+// seedLen is how many opening messages are structural rather than
+// conversational: the system prompt, and the repo map if there is one. They are
+// never trimmed.
+func (a *Agent) seedLen() int {
+	n := 0
+	for _, m := range a.messages {
+		if m.Role != "system" {
+			break
+		}
+		n++
+	}
+	if n == 0 {
+		return 1
+	}
+	return n
 }
 
 // elisionNote summarises what trimming removed. It is mechanical on purpose: an

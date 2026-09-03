@@ -45,6 +45,11 @@ type Config struct {
 	MaxTurns           int `json:"max_turns"`
 	CompactThreshold   int `json:"compact_threshold_bytes"`
 	MaxHistoryMessages int `json:"max_history_messages"`
+	// RepoMapTokens budgets a structural summary of the project injected once
+	// per session, so the model starts with a picture instead of guessing
+	// filenames. Zero disables it, which is the default until the benchmark
+	// shows the turns saved outweigh the tokens spent on every request.
+	RepoMapTokens int `json:"repo_map_tokens"`
 
 	// Tool budgets
 	MaxSliceLines    int `json:"max_slice_lines"`
@@ -104,6 +109,7 @@ func Defaults() Config {
 		MaxTurns:           10,
 		CompactThreshold:   400,
 		MaxHistoryMessages: 60,
+		RepoMapTokens:      0,
 		MaxSliceLines:      120,
 		MaxLineChars:       500,
 		SearchMaxMatches:   10,
@@ -306,6 +312,9 @@ func (c Config) Validate() error {
 		if check.val <= 0 {
 			problems = append(problems, fmt.Sprintf("%s must be > 0 (got %d)", check.name, check.val))
 		}
+	}
+	if c.RepoMapTokens < 0 {
+		problems = append(problems, fmt.Sprintf("repo_map_tokens must be >= 0 (got %d)", c.RepoMapTokens))
 	}
 	if c.Temperature < 0 {
 		problems = append(problems, fmt.Sprintf("temperature must be >= 0 (got %v)", c.Temperature))
