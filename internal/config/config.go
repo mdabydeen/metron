@@ -21,8 +21,16 @@ import (
 // behaviour exactly.
 type Config struct {
 	// Connection
+	// Provider selects the wire format. "openai" reaches llama.cpp's server,
+	// LM Studio, vLLM, OpenRouter and Ollama's own compatibility endpoint, so
+	// one setting covers most of what people actually run.
+	Provider string `json:"provider"`
 	Endpoint string `json:"endpoint"`
 	Model    string `json:"model"`
+	// APIKeyEnv names the environment variable holding the key, rather than
+	// holding the key. A secret in a config file is one `cat` from being
+	// pasted into an issue.
+	APIKeyEnv string `json:"api_key_env"`
 	// TimeoutSeconds bounds silence, not total generation time: a streamed
 	// reply that keeps arriving is never cut off, however long it takes.
 	TimeoutSeconds int  `json:"timeout_seconds"`
@@ -84,7 +92,9 @@ type Config struct {
 // Defaults returns the built-in configuration.
 func Defaults() Config {
 	return Config{
+		Provider:           ProviderOllama,
 		Endpoint:           "http://localhost:11434/api/chat",
+		APIKeyEnv:          "",
 		Model:              "qwen2.5-coder:32b",
 		TimeoutSeconds:     180,
 		Stream:             true,
@@ -109,6 +119,24 @@ func Defaults() Config {
 		SaveSessions:       false,
 		AutoApprovePatches: false,
 	}
+}
+
+// The wire formats metron can speak.
+const (
+	ProviderOllama = "ollama"
+	ProviderOpenAI = "openai"
+)
+
+// Providers lists the valid provider settings.
+var Providers = []string{ProviderOllama, ProviderOpenAI}
+
+// APIKey reads the key from the environment variable the config names, or ""
+// when none is configured.
+func (c Config) APIKey() string {
+	if c.APIKeyEnv == "" {
+		return ""
+	}
+	return os.Getenv(c.APIKeyEnv)
 }
 
 // ProjectFile is the config file metron looks for in the working directory.
@@ -292,6 +320,10 @@ func (c Config) Validate() error {
 			problems = append(problems, fmt.Sprintf("disabled_tools: unknown tool %q (known: %s)",
 				name, strings.Join(tools.ToolNames, ", ")))
 		}
+	}
+	if !slices.Contains(Providers, c.Provider) {
+		problems = append(problems, fmt.Sprintf("provider must be one of %s (got %q)",
+			strings.Join(Providers, ", "), c.Provider))
 	}
 	if !slices.Contains(tools.EditFormats, c.EditFormat) {
 		problems = append(problems, fmt.Sprintf("edit_format must be one of %s (got %q)",

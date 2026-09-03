@@ -18,7 +18,9 @@ import (
 
 	"github.com/mdabydeen/metron/internal/agent"
 	"github.com/mdabydeen/metron/internal/config"
+	"github.com/mdabydeen/metron/internal/llm"
 	"github.com/mdabydeen/metron/internal/ollama"
+	"github.com/mdabydeen/metron/internal/openai"
 	"github.com/mdabydeen/metron/internal/session"
 	"github.com/mdabydeen/metron/internal/tools"
 )
@@ -46,13 +48,13 @@ type fakeStepper struct {
 	resets  int
 	msgs    int
 	bytes   int
-	usage   ollama.Usage
+	usage   llm.Usage
 	calls   int
 
 	advertised  []string
 	schemaBytes int
 	tools       []agent.ToolRun
-	messages    []ollama.Message
+	messages    []llm.Message
 	restored    bool
 }
 
@@ -68,12 +70,12 @@ func (f *fakeStepper) Reset() { f.resets++ }
 
 func (f *fakeStepper) HistorySize() (int, int) { return f.msgs, f.bytes }
 
-func (f *fakeStepper) LastUsage() (ollama.Usage, int) { return f.usage, f.calls }
+func (f *fakeStepper) LastUsage() (llm.Usage, int) { return f.usage, f.calls }
 
 func (f *fakeStepper) AdvertisedTools() ([]string, int) { return f.advertised, f.schemaBytes }
 func (f *fakeStepper) LastTools() []agent.ToolRun       { return f.tools }
-func (f *fakeStepper) Messages() []ollama.Message       { return f.messages }
-func (f *fakeStepper) Restore(m []ollama.Message)       { f.messages = m; f.restored = true }
+func (f *fakeStepper) Messages() []llm.Message          { return f.messages }
+func (f *fakeStepper) Restore(m []llm.Message)          { f.messages = m; f.restored = true }
 
 // gitDir makes a scratch git repository the working directory. apply_patch is
 // only advertised inside a work tree, so any test that exercises the patch path
@@ -532,10 +534,10 @@ type contextStepper struct{}
 func (contextStepper) Step(ctx context.Context, _ string) (string, error) { return "", ctx.Err() }
 func (contextStepper) Reset()                                             {}
 func (contextStepper) HistorySize() (int, int)                            { return 0, 0 }
-func (contextStepper) LastUsage() (ollama.Usage, int)                     { return ollama.Usage{}, 0 }
+func (contextStepper) LastUsage() (llm.Usage, int)                        { return llm.Usage{}, 0 }
 func (contextStepper) LastTools() []agent.ToolRun                         { return nil }
-func (contextStepper) Messages() []ollama.Message                         { return nil }
-func (contextStepper) Restore([]ollama.Message)                           {}
+func (contextStepper) Messages() []llm.Message                            { return nil }
+func (contextStepper) Restore([]llm.Message)                              {}
 func (contextStepper) AdvertisedTools() ([]string, int)                   { return nil, 0 }
 
 // signallingStepper raises a real SIGINT from inside the turn, which the
@@ -556,10 +558,10 @@ func (signallingStepper) Step(ctx context.Context, _ string) (string, error) {
 }
 func (signallingStepper) Reset()                           {}
 func (signallingStepper) HistorySize() (int, int)          { return 0, 0 }
-func (signallingStepper) LastUsage() (ollama.Usage, int)   { return ollama.Usage{}, 0 }
+func (signallingStepper) LastUsage() (llm.Usage, int)      { return llm.Usage{}, 0 }
 func (signallingStepper) LastTools() []agent.ToolRun       { return nil }
-func (signallingStepper) Messages() []ollama.Message       { return nil }
-func (signallingStepper) Restore([]ollama.Message)         {}
+func (signallingStepper) Messages() []llm.Message          { return nil }
+func (signallingStepper) Restore([]llm.Message)            {}
 func (signallingStepper) AdvertisedTools() ([]string, int) { return nil, 0 }
 
 func TestStepCancelsTheTurnOnInterrupt(t *testing.T) {
@@ -672,7 +674,7 @@ func TestExampleConfigMatchesDefaults(t *testing.T) {
 
 func TestRunReportsTokenUsage(t *testing.T) {
 	var out bytes.Buffer
-	bot := &fakeStepper{reply: "ok", usage: ollama.Usage{PromptTokens: 1240, GenTokens: 89}, calls: 3}
+	bot := &fakeStepper{reply: "ok", usage: llm.Usage{PromptTokens: 1240, GenTokens: 89}, calls: 3}
 
 	run(context.Background(), replFor("hi\n"), &out, cfgFor("m"), "", testEnv(t), bot, testRecorder(t), false)
 
@@ -698,7 +700,7 @@ func TestRunWarnsWhenThePromptCrowdsTheContextWindow(t *testing.T) {
 	var out bytes.Buffer
 	cfg := cfgFor("m")
 	cfg.NumCtx = 1000
-	bot := &fakeStepper{reply: "ok", usage: ollama.Usage{PromptTokens: 900, GenTokens: 10}}
+	bot := &fakeStepper{reply: "ok", usage: llm.Usage{PromptTokens: 900, GenTokens: 10}}
 
 	run(context.Background(), replFor("hi\n"), &out, cfg, "", testEnv(t), bot, testRecorder(t), false)
 
@@ -711,7 +713,7 @@ func TestRunDoesNotWarnBelowTheContextThreshold(t *testing.T) {
 	var out bytes.Buffer
 	cfg := cfgFor("m")
 	cfg.NumCtx = 1000
-	bot := &fakeStepper{reply: "ok", usage: ollama.Usage{PromptTokens: 100, GenTokens: 10}}
+	bot := &fakeStepper{reply: "ok", usage: llm.Usage{PromptTokens: 100, GenTokens: 10}}
 
 	run(context.Background(), replFor("hi\n"), &out, cfg, "", testEnv(t), bot, testRecorder(t), false)
 
@@ -1224,7 +1226,7 @@ func TestCommandSaveAndSessions(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.SaveSessions = true
 	sess := newRecorder(session.Store{Root: dir}, cfg, io.Discard)
-	bot := &fakeStepper{messages: []ollama.Message{{Role: "user", Content: "hi"}}}
+	bot := &fakeStepper{messages: []llm.Message{{Role: "user", Content: "hi"}}}
 
 	var out bytes.Buffer
 	command(&out, "/save", cfg, "", testEnv(t), bot, sess)
@@ -1438,5 +1440,41 @@ func TestOneShotJSONReportsAnEncodingFailure(t *testing.T) {
 
 	if code != 1 || !strings.Contains(errOut.String(), "error:") {
 		t.Fatalf("oneShot() = %d, stderr = %q, want the encode failure reported", code, errOut.String())
+	}
+}
+
+func TestNewProviderSelectsTheWireFormat(t *testing.T) {
+	cfg := config.Defaults()
+	if _, ok := newProvider(cfg, llm.Options{}).(*ollama.Client); !ok {
+		t.Fatal("newProvider() did not return an Ollama client by default")
+	}
+
+	cfg.Provider = config.ProviderOpenAI
+	if _, ok := newProvider(cfg, llm.Options{}).(*openai.Client); !ok {
+		t.Fatal("newProvider() did not return an OpenAI client when configured")
+	}
+}
+
+func TestRunMainTalksToAnOpenAIEndpoint(t *testing.T) {
+	gitDir(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"from openai"}}],
+			"usage":{"prompt_tokens":10,"completion_tokens":2}}`)
+	}))
+	defer srv.Close()
+	cfgPath := filepath.Join(t.TempDir(), "cfg.json")
+	if err := os.WriteFile(cfgPath, []byte(`{"provider":"openai","endpoint":"`+srv.URL+`","model":"m"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("METRON_CONFIG", cfgPath)
+	t.Setenv("OLLAMA_HOST", "")
+	t.Setenv("OLLAMA_MODEL", "")
+
+	var out, errOut bytes.Buffer
+	if code := runMain([]string{"-p", "hi"}, strings.NewReader(""), &out, &errOut); code != 0 {
+		t.Fatalf("runMain() = %d\n%s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "from openai") {
+		t.Fatalf("stdout = %q, want the OpenAI-format answer", out.String())
 	}
 }

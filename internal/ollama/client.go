@@ -10,102 +10,40 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/mdabydeen/metron/internal/llm"
 )
 
-type ToolCall struct {
-	Function struct {
-		Name      string         `json:"name"`
-		Arguments map[string]any `json:"arguments"`
-	} `json:"function"`
-}
-
-type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-	// ToolName identifies which tool a role:"tool" message answers. Without it
-	// a reply carrying several tool calls comes back as N anonymous results in
-	// arrival order, leaving the model to guess the pairing -- exactly the
-	// guessing the system prompt forbids.
-	ToolName  string     `json:"tool_name,omitempty"`
-	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
-}
-
-type Tool struct {
-	Type     string `json:"type"`
-	Function any    `json:"function"`
-}
-
+// ChatRequest is Ollama's wire format for /api/chat. It is deliberately not the
+// agent's vocabulary: those types live in internal/llm, and this package
+// translates at the edge.
 type ChatRequest struct {
 	Model    string         `json:"model"`
-	Messages []Message      `json:"messages"`
-	Tools    []Tool         `json:"tools,omitempty"`
+	Messages []llm.Message  `json:"messages"`
+	Tools    []llm.Tool     `json:"tools,omitempty"`
 	Stream   bool           `json:"stream"`
 	Options  map[string]any `json:"options,omitempty"`
 }
 
 type ChatResponse struct {
-	Message Message `json:"message"`
-	Done    bool    `json:"done"`
+	Message llm.Message `json:"message"`
+	Done    bool        `json:"done"`
 	// Ollama reports what the exchange actually cost. metron's whole premise is
 	// bounding that number, so it is measured rather than discarded.
 	PromptEvalCount int `json:"prompt_eval_count"`
 	EvalCount       int `json:"eval_count"`
 }
 
-// Usage is the token cost of one model call.
-type Usage struct {
-	PromptTokens int // tokens the request occupied, history included
-	GenTokens    int // tokens the model produced
-}
-
-// Add accumulates the cost of another call.
-func (u *Usage) Add(other Usage) {
-	u.PromptTokens += other.PromptTokens
-	u.GenTokens += other.GenTokens
-}
-
-// Reply pairs the model's message with what it cost to obtain.
-type Reply struct {
-	Message
-	Usage Usage
-}
-
-// Options carries the per-request generation settings, the idle timeout and
-// where streamed content is echoed.
-type Options struct {
-	Temperature float64
-	TopP        float64
-	NumCtx      int
-
-	// Timeout bounds silence, not total generation. A total deadline is the
-	// wrong shape for a local model: a big one legitimately spends minutes on a
-	// reply, and cutting it off mid-thought is the failure this avoids.
-	Timeout time.Duration
-
-	// Stream requests incremental output. When false the client waits for the
-	// whole reply, which is what a scripted caller wants.
-	Stream bool
-
-	// Sink receives content as it arrives while streaming. nil discards it --
-	// the assembled reply is returned either way.
-	Sink io.Writer
-}
-
-// DefaultOptions matches metron's built-in configuration.
-func DefaultOptions() Options {
-	return Options{Temperature: 0.1, TopP: 0.95, NumCtx: 16384, Timeout: 180 * time.Second}
-}
-
 type Client struct {
 	endpoint string
 	model    string
-	opts     Options
+	opts     llm.Options
 	http     *http.Client
 }
 
-func NewClient(endpoint, model string, opts Options) *Client {
+func NewClient(endpoint, model string, opts llm.Options) *Client {
 	if opts.Timeout <= 0 {
-		opts.Timeout = DefaultOptions().Timeout
+		opts.Timeout = llm.DefaultOptions().Timeout
 	}
 	return &Client{
 		endpoint: endpoint,
@@ -117,7 +55,7 @@ func NewClient(endpoint, model string, opts Options) *Client {
 	}
 }
 
-func (c *Client) Chat(ctx context.Context, messages []Message, tools []Tool) (*Reply, error) {
+func (c *Client) Chat(ctx context.Context, messages []llm.Message, tools []llm.Tool) (*llm.Reply, error) {
 	reqBody := ChatRequest{
 		Model:    c.model,
 		Messages: messages,
@@ -172,7 +110,7 @@ func (c *Client) Chat(ctx context.Context, messages []Message, tools []Tool) (*R
 
 // readStream assembles Ollama's NDJSON chunks into one reply, echoing content
 // to the sink as it arrives and resetting the idle watchdog on every chunk.
-func (c *Client) readStream(body io.Reader, watchdog *time.Timer) (*Reply, error) {
+func (c *Client) readStream(body io.Reader, watchdog *time.Timer) (*llm.Reply, error) {
 	var (
 		assembled ollamaStream
 		dec       = json.NewDecoder(body)
@@ -203,7 +141,7 @@ func (c *Client) readStream(body io.Reader, watchdog *time.Timer) (*Reply, error
 		}
 	}
 
-	return replyFrom(assembled.final, Message{
+	return replyFrom(assembled.final, llm.Message{
 		Role:      assembled.role,
 		Content:   assembled.content.String(),
 		ToolCalls: assembled.toolCalls,
@@ -214,14 +152,14 @@ func (c *Client) readStream(body io.Reader, watchdog *time.Timer) (*Reply, error
 type ollamaStream struct {
 	role      string
 	content   strings.Builder
-	toolCalls []ToolCall
+	toolCalls []llm.ToolCall
 	final     ChatResponse
 }
 
-func replyFrom(resp ChatResponse, msg Message) *Reply {
-	return &Reply{
+func replyFrom(resp ChatResponse, msg llm.Message) *llm.Reply {
+	return &llm.Reply{
 		Message: msg,
-		Usage: Usage{
+		Usage: llm.Usage{
 			PromptTokens: resp.PromptEvalCount,
 			GenTokens:    resp.EvalCount,
 		},

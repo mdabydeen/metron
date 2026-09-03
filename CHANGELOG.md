@@ -31,6 +31,11 @@ is pre-1.0, the minor version is bumped for breaking changes to configuration or
   a git repository withdraws `apply_patch`. Their schemas are then not sent at all, and the
   system prompt stops naming them — on a stock Mac that is ~164 fewer prompt tokens on every
   request. A call to an unadvertised tool is refused before it runs.
+- An OpenAI-compatible provider, selected with `"provider": "openai"`. One wire format
+  reaches llama.cpp's server, LM Studio, vLLM, OpenRouter and Ollama's own compatibility
+  endpoint, so metron works with whatever you already run. The agent's vocabulary moved to
+  `internal/llm`, so the loop no longer knows whose API is on the other end. An API key is
+  named by `api_key_env` and read from the environment, never held in a config file.
 - Session persistence. With `save_sessions` on, the conversation is written to
   `.metron/sessions/<id>.jsonl` as each turn completes, and `/save`, `/sessions`,
   `--resume <id>` and `--resume-last` manage it. The directory ignores itself in git.

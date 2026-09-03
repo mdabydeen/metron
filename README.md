@@ -179,6 +179,8 @@ cp metron.example.json .metron.json
 
 | Key | Default | Meaning |
 | --- | --- | --- |
+| `provider` | `"ollama"` | wire format: `ollama` or `openai` |
+| `api_key_env` | `""` | environment variable holding the API key, if the endpoint wants one |
 | `endpoint` | `http://localhost:11434/api/chat` | Ollama chat endpoint, path included |
 | `model` | `qwen2.5-coder:32b` | model name to request |
 | `timeout_seconds` | `180` | seconds of *silence* before a model call is abandoned |

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mdabydeen/metron/internal/ollama"
+	"github.com/mdabydeen/metron/internal/llm"
 	"github.com/mdabydeen/metron/internal/tools"
 )
 
@@ -57,14 +57,14 @@ func DefaultOptions() Options {
 // Chatter is the subset of *ollama.Client that the agent depends on.
 // It exists so the loop can be exercised without a live Ollama server.
 type Chatter interface {
-	Chat(ctx context.Context, messages []ollama.Message, tools []ollama.Tool) (*ollama.Reply, error)
+	Chat(ctx context.Context, messages []llm.Message, tools []llm.Tool) (*llm.Reply, error)
 }
 
 type Agent struct {
 	client    Chatter
 	opts      Options
-	messages  []ollama.Message
-	lastUsage ollama.Usage
+	messages  []llm.Message
+	lastUsage llm.Usage
 	lastCalls int
 	lastTools []ToolRun
 
@@ -72,7 +72,7 @@ type Agent struct {
 	// is built. Schemas are paid for on every model call, so a tool that cannot
 	// run here is left out rather than offered and refused.
 	advertised  []string
-	schemas     []ollama.Tool
+	schemas     []llm.Tool
 	unavailable map[string]string
 }
 
@@ -122,7 +122,7 @@ func New(client Chatter, opts Options) *Agent {
 	opts.Env = opts.Env.Rooted()
 	unavailable := opts.Env.UnavailableTools()
 	advertised := advertise(unavailable, opts.DisabledTools)
-	schemas := make([]ollama.Tool, 0, len(advertised))
+	schemas := make([]llm.Tool, 0, len(advertised))
 	for _, name := range advertised {
 		schemas = append(schemas, describeTool(name, opts.Env))
 	}
@@ -132,7 +132,7 @@ func New(client Chatter, opts Options) *Agent {
 		advertised:  advertised,
 		schemas:     schemas,
 		unavailable: unavailable,
-		messages:    []ollama.Message{{Role: "system", Content: systemPrompt(advertised)}},
+		messages:    []llm.Message{{Role: "system", Content: systemPrompt(advertised)}},
 	}
 }
 
@@ -140,7 +140,7 @@ func New(client Chatter, opts Options) *Agent {
 // static description is not enough. run_command is the case that matters: a
 // model told only that "permitted commands" exist will guess, and every guess
 // costs a turn, so the allowlist itself goes into the description.
-func describeTool(name string, env tools.Env) ollama.Tool {
+func describeTool(name string, env tools.Env) llm.Tool {
 	def := toolDefs[name]
 	if name != tools.ToolRunCommand {
 		return def
@@ -190,10 +190,10 @@ func (a *Agent) AdvertisedTools() (names []string, schemaBytes int) {
 // History is otherwise unbounded, so this is how an operator reclaims the
 // context window without restarting the process.
 func (a *Agent) Reset() {
-	a.messages = []ollama.Message{{Role: "system", Content: systemPrompt(a.advertised)}}
+	a.messages = []llm.Message{{Role: "system", Content: systemPrompt(a.advertised)}}
 }
 
-var toolDefs = map[string]ollama.Tool{
+var toolDefs = map[string]llm.Tool{
 	tools.ToolListFiles: {
 		Type: "function",
 		Function: map[string]any{
@@ -306,8 +306,8 @@ var toolDefs = map[string]ollama.Tool{
 }
 
 func (a *Agent) Step(ctx context.Context, userPrompt string) (string, error) {
-	a.messages = append(a.messages, ollama.Message{Role: "user", Content: userPrompt})
-	a.lastUsage, a.lastCalls, a.lastTools = ollama.Usage{}, 0, nil
+	a.messages = append(a.messages, llm.Message{Role: "user", Content: userPrompt})
+	a.lastUsage, a.lastCalls, a.lastTools = llm.Usage{}, 0, nil
 
 	// Execution loop
 	for turns := 0; turns < a.opts.MaxTurns; turns++ {
@@ -332,7 +332,7 @@ func (a *Agent) Step(ctx context.Context, userPrompt string) (string, error) {
 				Name: call.Function.Name,
 				Ms:   time.Since(started).Milliseconds(),
 			})
-			a.messages = append(a.messages, ollama.Message{
+			a.messages = append(a.messages, llm.Message{
 				Role:     "tool",
 				ToolName: call.Function.Name,
 				Content:  out,
@@ -343,7 +343,7 @@ func (a *Agent) Step(ctx context.Context, userPrompt string) (string, error) {
 	return "", fmt.Errorf("max turns exceeded")
 }
 
-func (a *Agent) dispatch(ctx context.Context, call ollama.ToolCall) string {
+func (a *Agent) dispatch(ctx context.Context, call llm.ToolCall) string {
 	name := call.Function.Name
 	args := call.Function.Arguments
 
@@ -503,15 +503,15 @@ func (a *Agent) LastTools() []ToolRun { return a.lastTools }
 // LastUsage reports what the most recent Step cost: tokens across every model
 // call it made, and how many tools it ran. A budget nobody can see is a budget
 // nobody keeps.
-func (a *Agent) LastUsage() (ollama.Usage, int) {
+func (a *Agent) LastUsage() (llm.Usage, int) {
 	return a.lastUsage, a.lastCalls
 }
 
 // Messages returns a copy of the conversation, for saving. It is a copy so a
 // caller writing it to disk cannot be surprised by the next turn mutating what
 // it is halfway through serialising -- compaction rewrites messages in place.
-func (a *Agent) Messages() []ollama.Message {
-	out := make([]ollama.Message, len(a.messages))
+func (a *Agent) Messages() []llm.Message {
+	out := make([]llm.Message, len(a.messages))
 	copy(out, a.messages)
 	return out
 }
@@ -521,7 +521,7 @@ func (a *Agent) Messages() []ollama.Message {
 // The system prompt is regenerated rather than restored: it describes the tools
 // available *now*, and a session saved on a machine with ripgrep should not tell
 // this one to call search_text.
-func (a *Agent) Restore(messages []ollama.Message) {
+func (a *Agent) Restore(messages []llm.Message) {
 	a.Reset()
 	for _, m := range messages {
 		if m.Role == "system" {

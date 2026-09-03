@@ -10,10 +10,12 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mdabydeen/metron/internal/llm"
 )
 
 func TestNewClientDefaults(t *testing.T) {
-	c := NewClient("http://example.invalid/api/chat", "test-model", DefaultOptions())
+	c := NewClient("http://example.invalid/api/chat", "test-model", llm.DefaultOptions())
 
 	if c.endpoint != "http://example.invalid/api/chat" || c.model != "test-model" {
 		t.Fatalf("NewClient() = %+v, want the endpoint and model stored", c)
@@ -46,15 +48,15 @@ func TestChatSendsWellFormedRequest(t *testing.T) {
 			t.Errorf("server could not decode request: %v", err)
 		}
 		json.NewEncoder(w).Encode(ChatResponse{
-			Message: Message{Role: "assistant", Content: "pong"},
+			Message: llm.Message{Role: "assistant", Content: "pong"},
 			Done:    true,
 		})
 	}))
 	defer srv.Close()
 
-	c := NewClient(srv.URL+"/api/chat", "qwen-test", DefaultOptions())
-	msgs := []Message{{Role: "user", Content: "ping"}}
-	tls := []Tool{{Type: "function", Function: map[string]any{"name": "find_symbol"}}}
+	c := NewClient(srv.URL+"/api/chat", "qwen-test", llm.DefaultOptions())
+	msgs := []llm.Message{{Role: "user", Content: "ping"}}
+	tls := []llm.Tool{{Type: "function", Function: map[string]any{"name": "find_symbol"}}}
 
 	msg, err := c.Chat(context.Background(), msgs, tls)
 	if err != nil {
@@ -93,11 +95,11 @@ func TestChatOmitsToolsWhenEmpty(t *testing.T) {
 	var raw map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewDecoder(r.Body).Decode(&raw)
-		json.NewEncoder(w).Encode(ChatResponse{Message: Message{Role: "assistant"}})
+		json.NewEncoder(w).Encode(ChatResponse{Message: llm.Message{Role: "assistant"}})
 	}))
 	defer srv.Close()
 
-	if _, err := NewClient(srv.URL, "m", DefaultOptions()).Chat(context.Background(), nil, nil); err != nil {
+	if _, err := NewClient(srv.URL, "m", llm.DefaultOptions()).Chat(context.Background(), nil, nil); err != nil {
 		t.Fatalf("Chat() error = %v", err)
 	}
 	if _, present := raw["tools"]; present {
@@ -113,7 +115,7 @@ func TestChatDecodesToolCalls(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	msg, err := NewClient(srv.URL, "m", DefaultOptions()).Chat(context.Background(), nil, nil)
+	msg, err := NewClient(srv.URL, "m", llm.DefaultOptions()).Chat(context.Background(), nil, nil)
 	if err != nil {
 		t.Fatalf("Chat() error = %v", err)
 	}
@@ -136,7 +138,7 @@ func TestChatReportsNonOKStatus(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := NewClient(srv.URL, "missing", DefaultOptions()).Chat(context.Background(), nil, nil)
+	_, err := NewClient(srv.URL, "missing", llm.DefaultOptions()).Chat(context.Background(), nil, nil)
 	if err == nil {
 		t.Fatal("Chat() = nil error, want a status error")
 	}
@@ -151,7 +153,7 @@ func TestChatReportsMalformedResponse(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := NewClient(srv.URL, "m", DefaultOptions()).Chat(context.Background(), nil, nil)
+	_, err := NewClient(srv.URL, "m", llm.DefaultOptions()).Chat(context.Background(), nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "decode response") {
 		t.Fatalf("Chat() error = %v, want a decode error", err)
 	}
@@ -162,7 +164,7 @@ func TestChatReportsTransportFailure(t *testing.T) {
 	url := srv.URL
 	srv.Close() // nothing is listening any more
 
-	_, err := NewClient(url, "m", DefaultOptions()).Chat(context.Background(), nil, nil)
+	_, err := NewClient(url, "m", llm.DefaultOptions()).Chat(context.Background(), nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "ollama http post") {
 		t.Fatalf("Chat() error = %v, want a transport error", err)
 	}
@@ -177,16 +179,16 @@ func TestChatHonoursContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, err := NewClient(srv.URL, "m", DefaultOptions()).Chat(ctx, nil, nil)
+	_, err := NewClient(srv.URL, "m", llm.DefaultOptions()).Chat(ctx, nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "ollama http post") {
 		t.Fatalf("Chat() error = %v, want the cancelled request reported", err)
 	}
 }
 
 func TestChatReportsUnmarshalableTools(t *testing.T) {
-	c := NewClient("http://example.invalid", "m", DefaultOptions())
+	c := NewClient("http://example.invalid", "m", llm.DefaultOptions())
 	// Functions cannot be JSON-encoded, so marshalling the request must fail.
-	bad := []Tool{{Type: "function", Function: func() {}}}
+	bad := []llm.Tool{{Type: "function", Function: func() {}}}
 
 	_, err := c.Chat(context.Background(), nil, bad)
 	if err == nil || !strings.Contains(err.Error(), "marshal request") {
@@ -195,17 +197,17 @@ func TestChatReportsUnmarshalableTools(t *testing.T) {
 }
 
 func TestChatReportsInvalidEndpoint(t *testing.T) {
-	_, err := NewClient(":://not a url", "m", DefaultOptions()).Chat(context.Background(), nil, nil)
+	_, err := NewClient(":://not a url", "m", llm.DefaultOptions()).Chat(context.Background(), nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "create request") {
 		t.Fatalf("Chat() error = %v, want a request-construction error", err)
 	}
 }
 
 func TestNewClientFallsBackToTheDefaultTimeout(t *testing.T) {
-	c := NewClient("http://example.invalid", "m", Options{Temperature: 0.2})
+	c := NewClient("http://example.invalid", "m", llm.Options{Temperature: 0.2})
 
-	if c.opts.Timeout != DefaultOptions().Timeout {
-		t.Fatalf("timeout = %v, want the default %v", c.opts.Timeout, DefaultOptions().Timeout)
+	if c.opts.Timeout != llm.DefaultOptions().Timeout {
+		t.Fatalf("timeout = %v, want the default %v", c.opts.Timeout, llm.DefaultOptions().Timeout)
 	}
 }
 
@@ -213,11 +215,11 @@ func TestChatSendsConfiguredSamplingOptions(t *testing.T) {
 	var got ChatRequest
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewDecoder(r.Body).Decode(&got)
-		json.NewEncoder(w).Encode(ChatResponse{Message: Message{Role: "assistant"}})
+		json.NewEncoder(w).Encode(ChatResponse{Message: llm.Message{Role: "assistant"}})
 	}))
 	defer srv.Close()
 
-	opts := Options{Temperature: 0.7, TopP: 0.5, NumCtx: 4096, Timeout: 5 * time.Second}
+	opts := llm.Options{Temperature: 0.7, TopP: 0.5, NumCtx: 4096, Timeout: 5 * time.Second}
 	if _, err := NewClient(srv.URL, "m", opts).Chat(context.Background(), nil, nil); err != nil {
 		t.Fatalf("Chat() error = %v", err)
 	}
@@ -236,7 +238,7 @@ func TestChatReportsTokenUsage(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	got, err := NewClient(srv.URL, "m", DefaultOptions()).Chat(context.Background(), nil, nil)
+	got, err := NewClient(srv.URL, "m", llm.DefaultOptions()).Chat(context.Background(), nil, nil)
 	if err != nil {
 		t.Fatalf("Chat() error = %v", err)
 	}
@@ -254,27 +256,27 @@ func TestChatReportsZeroUsageWhenTheServerOmitsCounts(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	got, err := NewClient(srv.URL, "m", DefaultOptions()).Chat(context.Background(), nil, nil)
+	got, err := NewClient(srv.URL, "m", llm.DefaultOptions()).Chat(context.Background(), nil, nil)
 	if err != nil {
 		t.Fatalf("Chat() error = %v", err)
 	}
-	if (got.Usage != Usage{}) {
+	if (got.Usage != llm.Usage{}) {
 		t.Fatalf("Usage = %+v, want zero when the server reports nothing", got.Usage)
 	}
 }
 
 func TestUsageAddAccumulates(t *testing.T) {
-	u := Usage{PromptTokens: 10, GenTokens: 2}
-	u.Add(Usage{PromptTokens: 5, GenTokens: 3})
+	u := llm.Usage{PromptTokens: 10, GenTokens: 2}
+	u.Add(llm.Usage{PromptTokens: 5, GenTokens: 3})
 
-	if (u != Usage{PromptTokens: 15, GenTokens: 5}) {
+	if (u != llm.Usage{PromptTokens: 15, GenTokens: 5}) {
 		t.Fatalf("Usage = %+v, want the counts summed", u)
 	}
 }
 
 // streamOpts requests streaming with content echoed to sink.
-func streamOpts(sink io.Writer) Options {
-	o := DefaultOptions()
+func streamOpts(sink io.Writer) llm.Options {
+	o := llm.DefaultOptions()
 	o.Stream = true
 	o.Sink = sink
 	return o
@@ -342,7 +344,7 @@ func TestChatStreamsWithoutASink(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	opts := DefaultOptions()
+	opts := llm.DefaultOptions()
 	opts.Stream = true
 	got, err := NewClient(srv.URL, "m", opts).Chat(context.Background(), nil, nil)
 	if err != nil {
@@ -390,7 +392,7 @@ func TestChatIdleTimeoutCancelsAStalledRequest(t *testing.T) {
 	defer srv.Close()
 	defer close(release)
 
-	opts := DefaultOptions()
+	opts := llm.DefaultOptions()
 	opts.Timeout = 50 * time.Millisecond
 	_, err := NewClient(srv.URL, "m", opts).Chat(context.Background(), nil, nil)
 

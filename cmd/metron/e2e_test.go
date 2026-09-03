@@ -15,6 +15,7 @@ import (
 
 	"github.com/mdabydeen/metron/internal/agent"
 	"github.com/mdabydeen/metron/internal/config"
+	"github.com/mdabydeen/metron/internal/llm"
 	"github.com/mdabydeen/metron/internal/ollama"
 	"github.com/mdabydeen/metron/internal/tools"
 )
@@ -99,7 +100,7 @@ func TestEndToEndPatchSession(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	bot := agent.New(ollama.NewClient(srv.URL+"/api/chat", "e2e-model", ollama.DefaultOptions()), agent.DefaultOptions())
+	bot := agent.New(ollama.NewClient(srv.URL+"/api/chat", "e2e-model", llm.DefaultOptions()), agent.DefaultOptions())
 	var out bytes.Buffer
 	cfg := config.Defaults()
 	cfg.Model = "e2e-model"
@@ -191,7 +192,7 @@ func TestEndToEndRunCommandSession(t *testing.T) {
 	env.Allowed = tools.ParseAllowlist([]string{"cat"})
 	opts := agent.DefaultOptions()
 	opts.Env = env
-	bot := agent.New(ollama.NewClient(srv.URL+"/api/chat", "m", ollama.DefaultOptions()), opts)
+	bot := agent.New(ollama.NewClient(srv.URL+"/api/chat", "m", llm.DefaultOptions()), opts)
 
 	var out bytes.Buffer
 	cfg := config.Defaults()
@@ -259,7 +260,7 @@ func TestEndToEndSearchReplaceSession(t *testing.T) {
 	env.EditFormat = tools.FormatSearchReplace
 	opts := agent.DefaultOptions()
 	opts.Env = env
-	bot := agent.New(ollama.NewClient(srv.URL+"/api/chat", "m", ollama.DefaultOptions()), opts)
+	bot := agent.New(ollama.NewClient(srv.URL+"/api/chat", "m", llm.DefaultOptions()), opts)
 
 	var out bytes.Buffer
 	cfg := config.Defaults()

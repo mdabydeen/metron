@@ -503,3 +503,31 @@ func TestDropPrivilegedNamesWhatAProjectFileTriedToSet(t *testing.T) {
 		t.Fatal("dropPrivileged() = nil error for unparseable input")
 	}
 }
+
+func TestValidateRejectsAnUnknownProvider(t *testing.T) {
+	cfg := Defaults()
+	cfg.Provider = "anthropic"
+
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "provider") {
+		t.Fatalf("Validate() error = %v, want an unknown provider rejected", err)
+	}
+	if !strings.Contains(err.Error(), "openai") {
+		t.Fatalf("Validate() error = %v, want the valid values listed", err)
+	}
+}
+
+func TestAPIKeyComesFromTheEnvironmentNotTheFile(t *testing.T) {
+	cfg := Defaults()
+	if got := cfg.APIKey(); got != "" {
+		t.Fatalf("APIKey() = %q, want empty when none is configured", got)
+	}
+
+	// The config names the variable rather than holding the key: a secret in a
+	// config file is one `cat` away from being pasted into an issue.
+	cfg.APIKeyEnv = "METRON_TEST_KEY"
+	t.Setenv("METRON_TEST_KEY", "sk-secret")
+	if got := cfg.APIKey(); got != "sk-secret" {
+		t.Fatalf("APIKey() = %q, want it read from the environment", got)
+	}
+}

@@ -20,7 +20,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mdabydeen/metron/internal/ollama"
+	"github.com/mdabydeen/metron/internal/llm"
 )
 
 // Dir is the directory, relative to the project root, that metron keeps its own
@@ -93,7 +93,7 @@ func (s Store) ensureDir() error {
 // trimming drops them, so an append-only log would accumulate a history the
 // agent no longer has. The write goes through a temporary file and a rename, so
 // a crash mid-save leaves the previous transcript rather than half of a new one.
-func (s Store) Save(meta Meta, messages []ollama.Message) error {
+func (s Store) Save(meta Meta, messages []llm.Message) error {
 	if err := s.ensureDir(); err != nil {
 		return fmt.Errorf("create session directory: %w", err)
 	}
@@ -120,7 +120,7 @@ func (s Store) Save(meta Meta, messages []ollama.Message) error {
 // writeTranscript serialises one session: metadata first, then a line per
 // message. It takes a writer rather than the file so the failure paths are
 // reachable in a test without having to fill a disk.
-func writeTranscript(w io.Writer, meta Meta, messages []ollama.Message) error {
+func writeTranscript(w io.Writer, meta Meta, messages []llm.Message) error {
 	enc := json.NewEncoder(w)
 	if err := enc.Encode(meta); err != nil {
 		return fmt.Errorf("write session metadata: %w", err)
@@ -134,7 +134,7 @@ func writeTranscript(w io.Writer, meta Meta, messages []ollama.Message) error {
 }
 
 // Load reads a transcript back.
-func (s Store) Load(id string) (Meta, []ollama.Message, error) {
+func (s Store) Load(id string) (Meta, []llm.Message, error) {
 	if !ValidID(id) {
 		return Meta{}, nil, fmt.Errorf("%q is not a session id; ids look like 20260903-142530", id)
 	}
@@ -146,7 +146,7 @@ func (s Store) Load(id string) (Meta, []ollama.Message, error) {
 
 	var (
 		meta     Meta
-		messages []ollama.Message
+		messages []llm.Message
 	)
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxLine)
@@ -161,7 +161,7 @@ func (s Store) Load(id string) (Meta, []ollama.Message, error) {
 			}
 			continue
 		}
-		var m ollama.Message
+		var m llm.Message
 		if err := json.Unmarshal(line, &m); err != nil {
 			return Meta{}, nil, fmt.Errorf("parse session message: %w", err)
 		}

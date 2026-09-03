@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mdabydeen/metron/internal/ollama"
+	"github.com/mdabydeen/metron/internal/llm"
 )
 
 func store(t *testing.T) Store {
@@ -23,7 +23,7 @@ func meta(id string) Meta {
 
 func TestSaveAndLoadRoundTrip(t *testing.T) {
 	s := store(t)
-	msgs := []ollama.Message{
+	msgs := []llm.Message{
 		{Role: "system", Content: "prompt"},
 		{Role: "user", Content: "hi"},
 		{Role: "tool", ToolName: "view_slice", Content: "    1 | x"},
@@ -72,13 +72,13 @@ func TestSaveIgnoresItselfInGit(t *testing.T) {
 
 func TestSaveIsAtomicAndReplacesThePreviousCopy(t *testing.T) {
 	s := store(t)
-	if err := s.Save(meta("20260101-000001"), []ollama.Message{{Role: "user", Content: "first"}}); err != nil {
+	if err := s.Save(meta("20260101-000001"), []llm.Message{{Role: "user", Content: "first"}}); err != nil {
 		t.Fatal(err)
 	}
 
 	// Compaction rewrites messages in place and trimming drops them, so the
 	// transcript is replaced rather than appended to.
-	if err := s.Save(meta("20260101-000001"), []ollama.Message{{Role: "user", Content: "second"}}); err != nil {
+	if err := s.Save(meta("20260101-000001"), []llm.Message{{Role: "user", Content: "second"}}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -311,7 +311,7 @@ func (f *failingWriter) Write(p []byte) (int, error) {
 }
 
 func TestWriteTranscriptReportsWriteFailures(t *testing.T) {
-	msgs := []ollama.Message{{Role: "user", Content: "hi"}}
+	msgs := []llm.Message{{Role: "user", Content: "hi"}}
 
 	if err := writeTranscript(&failingWriter{allow: 0}, meta("20260101-000002"), msgs); err == nil ||
 		!strings.Contains(err.Error(), "metadata") {
@@ -400,7 +400,7 @@ func TestLoadRejectsAnIdThatIsAPath(t *testing.T) {
 
 func TestSavedTranscriptsAreNotWorldReadable(t *testing.T) {
 	s := store(t)
-	if err := s.Save(meta("20260101-000001"), []ollama.Message{
+	if err := s.Save(meta("20260101-000001"), []llm.Message{
 		{Role: "tool", Content: "contents of whatever the model read"},
 	}); err != nil {
 		t.Fatal(err)

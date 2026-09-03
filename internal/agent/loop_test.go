@@ -11,43 +11,43 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mdabydeen/metron/internal/ollama"
+	"github.com/mdabydeen/metron/internal/llm"
 	"github.com/mdabydeen/metron/internal/tools"
 )
 
 // fakeChatter replays a scripted sequence of model replies and records the
 // history it was handed on each call.
 type fakeChatter struct {
-	replies []ollama.Message
-	usage   ollama.Usage
+	replies []llm.Message
+	usage   llm.Usage
 	err     error
 	calls   int
-	seen    [][]ollama.Message
-	tools   []ollama.Tool
+	seen    [][]llm.Message
+	tools   []llm.Tool
 }
 
-func (f *fakeChatter) Chat(ctx context.Context, messages []ollama.Message, tools []ollama.Tool) (*ollama.Reply, error) {
+func (f *fakeChatter) Chat(ctx context.Context, messages []llm.Message, tools []llm.Tool) (*llm.Reply, error) {
 	f.calls++
-	f.seen = append(f.seen, append([]ollama.Message(nil), messages...))
+	f.seen = append(f.seen, append([]llm.Message(nil), messages...))
 	f.tools = tools
 	if f.err != nil {
 		return nil, f.err
 	}
 	if len(f.replies) == 0 {
-		return &ollama.Reply{Message: ollama.Message{Role: "assistant", Content: "done"}, Usage: f.usage}, nil
+		return &llm.Reply{Message: llm.Message{Role: "assistant", Content: "done"}, Usage: f.usage}, nil
 	}
 	next := f.replies[0]
 	if len(f.replies) > 1 {
 		f.replies = f.replies[1:]
 	}
-	return &ollama.Reply{Message: next, Usage: f.usage}, nil
+	return &llm.Reply{Message: next, Usage: f.usage}, nil
 }
 
-func toolCall(name string, args map[string]any) ollama.Message {
-	var tc ollama.ToolCall
+func toolCall(name string, args map[string]any) llm.Message {
+	var tc llm.ToolCall
 	tc.Function.Name = name
 	tc.Function.Arguments = args
-	return ollama.Message{Role: "assistant", ToolCalls: []ollama.ToolCall{tc}}
+	return llm.Message{Role: "assistant", ToolCalls: []llm.ToolCall{tc}}
 }
 
 // isolate moves the test into an empty directory with no external binaries on
@@ -120,7 +120,7 @@ func TestNewSeedsSystemPrompt(t *testing.T) {
 }
 
 func TestStepReturnsAnswerWithoutToolCalls(t *testing.T) {
-	fake := &fakeChatter{replies: []ollama.Message{{Role: "assistant", Content: "hello"}}}
+	fake := &fakeChatter{replies: []llm.Message{{Role: "assistant", Content: "hello"}}}
 	a := New(fake, DefaultOptions())
 
 	got, err := a.Step(context.Background(), "hi")
@@ -180,7 +180,7 @@ func TestStepRunsToolThenAnswers(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "sample.go"), []byte("one\ntwo\nthree\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	fake := &fakeChatter{replies: []ollama.Message{
+	fake := &fakeChatter{replies: []llm.Message{
 		toolCall("view_slice", map[string]any{"path": "sample.go", "start": float64(1), "end": float64(2)}),
 		{Role: "assistant", Content: "the file starts with one"},
 	}}
@@ -212,7 +212,7 @@ func TestStepRunsEveryToolCallInOneReply(t *testing.T) {
 	second.Function.Name = "bogus_tool"
 	multi.ToolCalls = append(multi.ToolCalls, second)
 
-	fake := &fakeChatter{replies: []ollama.Message{multi, {Role: "assistant", Content: "ok"}}}
+	fake := &fakeChatter{replies: []llm.Message{multi, {Role: "assistant", Content: "ok"}}}
 	a := New(fake, DefaultOptions())
 
 	if _, err := a.Step(context.Background(), "go"); err != nil {
@@ -239,7 +239,7 @@ func TestStepPropagatesClientError(t *testing.T) {
 func TestStepStopsAfterMaxTurns(t *testing.T) {
 	isolate(t)
 	loopForever := toolCall("search_text", map[string]any{"pattern": "x"})
-	fake := &fakeChatter{replies: []ollama.Message{loopForever}}
+	fake := &fakeChatter{replies: []llm.Message{loopForever}}
 	a := New(fake, DefaultOptions())
 
 	_, err := a.Step(context.Background(), "spin")
@@ -284,7 +284,7 @@ func TestDispatchRoutesToolsAndReportsErrors(t *testing.T) {
 
 	tests := []struct {
 		name string
-		call ollama.Message
+		call llm.Message
 		want string
 	}{
 		{"find_symbol hit", toolCall("find_symbol", map[string]any{"symbol": "Alpha"}), "sample.go:1"},
@@ -372,7 +372,7 @@ func TestDispatchSearchTextSuccess(t *testing.T) {
 
 func TestCompactContextRedactsOnlyLargeSlices(t *testing.T) {
 	big := strings.Repeat("    1 | filler line\n", 40) // > 400 chars, contains " | "
-	a := &Agent{opts: DefaultOptions(), messages: []ollama.Message{
+	a := &Agent{opts: DefaultOptions(), messages: []llm.Message{
 		{Role: "tool", Content: big},
 		{Role: "tool", Content: strings.Repeat("no delimiter here ", 40)},
 		{Role: "tool", Content: "    1 | short slice"},
@@ -401,7 +401,7 @@ func TestStepCompactsSlicesOnceTurnCompletes(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "big.go"), []byte(long), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	fake := &fakeChatter{replies: []ollama.Message{
+	fake := &fakeChatter{replies: []llm.Message{
 		toolCall("view_slice", map[string]any{"path": "big.go", "start": 1, "end": 60}),
 		{Role: "assistant", Content: "summarised"},
 	}}
@@ -572,7 +572,7 @@ func TestDispatchAppliesWhenTheOperatorApproves(t *testing.T) {
 
 func TestStepLabelsToolResultsWithTheirToolName(t *testing.T) {
 	isolate(t)
-	client := &fakeChatter{replies: []ollama.Message{
+	client := &fakeChatter{replies: []llm.Message{
 		toolCall("find_symbol", map[string]any{"symbol": "Greet"}),
 		{Role: "assistant", Content: "done"},
 	}}
@@ -598,7 +598,7 @@ func TestTrimHistoryKeepsTheSystemPromptAndTheNewestMessages(t *testing.T) {
 	opts.MaxHistoryMessages = 4
 	a := New(&fakeChatter{}, opts)
 	for i := 0; i < 10; i++ {
-		a.messages = append(a.messages, ollama.Message{Role: "user", Content: strconv.Itoa(i)})
+		a.messages = append(a.messages, llm.Message{Role: "user", Content: strconv.Itoa(i)})
 	}
 
 	a.trimHistory()
@@ -619,11 +619,11 @@ func TestTrimHistoryNeverLeavesAnOrphanToolResult(t *testing.T) {
 	opts.MaxHistoryMessages = 3
 	a := New(&fakeChatter{}, opts)
 	a.messages = append(a.messages,
-		ollama.Message{Role: "user", Content: "old"},
+		llm.Message{Role: "user", Content: "old"},
 		toolCall("find_symbol", map[string]any{"symbol": "X"}),
-		ollama.Message{Role: "tool", ToolName: "find_symbol", Content: "r1"},
-		ollama.Message{Role: "tool", ToolName: "find_symbol", Content: "r2"},
-		ollama.Message{Role: "assistant", Content: "answer"},
+		llm.Message{Role: "tool", ToolName: "find_symbol", Content: "r1"},
+		llm.Message{Role: "tool", ToolName: "find_symbol", Content: "r2"},
+		llm.Message{Role: "assistant", Content: "answer"},
 	)
 
 	a.trimHistory()
@@ -638,7 +638,7 @@ func TestTrimHistoryNeverLeavesAnOrphanToolResult(t *testing.T) {
 
 func TestTrimHistoryLeavesShortHistoriesAlone(t *testing.T) {
 	a := New(&fakeChatter{}, DefaultOptions())
-	a.messages = append(a.messages, ollama.Message{Role: "user", Content: "hi"})
+	a.messages = append(a.messages, llm.Message{Role: "user", Content: "hi"})
 
 	a.trimHistory()
 
@@ -652,7 +652,7 @@ func TestTrimHistoryTreatsANonPositiveBudgetAsUnlimited(t *testing.T) {
 	opts.MaxHistoryMessages = 0
 	a := New(&fakeChatter{}, opts)
 	for i := 0; i < 50; i++ {
-		a.messages = append(a.messages, ollama.Message{Role: "user", Content: "x"})
+		a.messages = append(a.messages, llm.Message{Role: "user", Content: "x"})
 	}
 
 	a.trimHistory()
@@ -675,7 +675,7 @@ func TestTrimHistoryHandlesEmptyHistory(t *testing.T) {
 
 func TestHistorySizeReportsCountAndBytes(t *testing.T) {
 	a := New(&fakeChatter{}, DefaultOptions())
-	a.messages = []ollama.Message{{Role: "system", Content: "abc"}, {Role: "user", Content: "de"}}
+	a.messages = []llm.Message{{Role: "system", Content: "abc"}, {Role: "user", Content: "de"}}
 
 	msgs, bytes := a.HistorySize()
 
@@ -703,7 +703,7 @@ func TestOptionsBoundMaxTurns(t *testing.T) {
 	isolate(t)
 	opts := DefaultOptions()
 	opts.MaxTurns = 2
-	fake := &fakeChatter{replies: []ollama.Message{toolCall("search_text", map[string]any{"pattern": "x"})}}
+	fake := &fakeChatter{replies: []llm.Message{toolCall("search_text", map[string]any{"pattern": "x"})}}
 
 	if _, err := New(fake, opts).Step(context.Background(), "spin"); err == nil {
 		t.Fatal("Step() = nil error, want max turns exceeded")
@@ -714,7 +714,7 @@ func TestOptionsBoundMaxTurns(t *testing.T) {
 }
 
 func TestOptionsBoundCompactionThreshold(t *testing.T) {
-	a := &Agent{opts: Options{CompactThreshold: 10}, messages: []ollama.Message{
+	a := &Agent{opts: Options{CompactThreshold: 10}, messages: []llm.Message{
 		{Role: "tool", Content: "    1 | just over ten characters"},
 	}}
 
@@ -756,8 +756,8 @@ func TestSearchBudgetsReachRipgrep(t *testing.T) {
 func TestLastUsageSumsEveryCallInTheTurn(t *testing.T) {
 	isolate(t)
 	client := &fakeChatter{
-		usage: ollama.Usage{PromptTokens: 100, GenTokens: 10},
-		replies: []ollama.Message{
+		usage: llm.Usage{PromptTokens: 100, GenTokens: 10},
+		replies: []llm.Message{
 			toolCall("find_symbol", map[string]any{"symbol": "Greet"}),
 			{Role: "assistant", Content: "done"},
 		},
@@ -780,7 +780,7 @@ func TestLastUsageSumsEveryCallInTheTurn(t *testing.T) {
 
 func TestLastUsageResetsBetweenTurns(t *testing.T) {
 	isolate(t)
-	client := &fakeChatter{usage: ollama.Usage{PromptTokens: 7, GenTokens: 3}}
+	client := &fakeChatter{usage: llm.Usage{PromptTokens: 7, GenTokens: 3}}
 	a := New(client, DefaultOptions())
 
 	for i := 0; i < 2; i++ {
@@ -1007,7 +1007,7 @@ func TestDescribeToolSurvivesAMalformedSchema(t *testing.T) {
 	// panic the constructor.
 	original := toolDefs[tools.ToolRunCommand]
 	t.Cleanup(func() { toolDefs[tools.ToolRunCommand] = original })
-	toolDefs[tools.ToolRunCommand] = ollama.Tool{Type: "function", Function: "not a map"}
+	toolDefs[tools.ToolRunCommand] = llm.Tool{Type: "function", Function: "not a map"}
 
 	got := describeTool(tools.ToolRunCommand, DefaultOptions().Env)
 
@@ -1166,7 +1166,7 @@ func TestRestoreReplacesHistoryAndRegeneratesThePrompt(t *testing.T) {
 	a := New(&fakeChatter{}, DefaultOptions())
 	fresh := a.messages[0].Content
 
-	a.Restore([]ollama.Message{
+	a.Restore([]llm.Message{
 		{Role: "system", Content: "a system prompt from a better-equipped machine mentioning search_text"},
 		{Role: "user", Content: "earlier question"},
 		{Role: "assistant", Content: "earlier answer"},
@@ -1192,9 +1192,9 @@ func TestRestoreTrimsToTheHistoryBudget(t *testing.T) {
 	opts.MaxHistoryMessages = 4
 	a := New(&fakeChatter{}, opts)
 
-	var saved []ollama.Message
+	var saved []llm.Message
 	for i := 0; i < 20; i++ {
-		saved = append(saved, ollama.Message{Role: "user", Content: strconv.Itoa(i)})
+		saved = append(saved, llm.Message{Role: "user", Content: strconv.Itoa(i)})
 	}
 	a.Restore(saved)
 
@@ -1209,7 +1209,7 @@ func TestLastToolsRecordsWhatRan(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("x\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	fake := &fakeChatter{replies: []ollama.Message{
+	fake := &fakeChatter{replies: []llm.Message{
 		toolCall("view_slice", map[string]any{"path": "a.go", "start": 1, "end": 1}),
 		{Role: "assistant", Content: "done"},
 	}}
@@ -1233,7 +1233,7 @@ func TestLastToolsResetsEachStep(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("x\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	fake := &fakeChatter{replies: []ollama.Message{
+	fake := &fakeChatter{replies: []llm.Message{
 		toolCall("view_slice", map[string]any{"path": "a.go", "start": 1, "end": 1}),
 		{Role: "assistant", Content: "done"},
 		{Role: "assistant", Content: "no tools this time"},

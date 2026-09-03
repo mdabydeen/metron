@@ -15,7 +15,9 @@ import (
 
 	"github.com/mdabydeen/metron/internal/agent"
 	"github.com/mdabydeen/metron/internal/config"
+	"github.com/mdabydeen/metron/internal/llm"
 	"github.com/mdabydeen/metron/internal/ollama"
+	"github.com/mdabydeen/metron/internal/openai"
 	"github.com/mdabydeen/metron/internal/session"
 	"github.com/mdabydeen/metron/internal/tools"
 )
@@ -41,11 +43,11 @@ type stepper interface {
 	Step(ctx context.Context, userPrompt string) (string, error)
 	Reset()
 	HistorySize() (messages, bytes int)
-	LastUsage() (ollama.Usage, int)
+	LastUsage() (llm.Usage, int)
 	LastTools() []agent.ToolRun
 	AdvertisedTools() (names []string, schemaBytes int)
-	Messages() []ollama.Message
-	Restore(messages []ollama.Message)
+	Messages() []llm.Message
+	Restore(messages []llm.Message)
 }
 
 // exit is indirected so tests can exercise main without killing the process.
@@ -117,7 +119,8 @@ func runMain(args []string, in io.Reader, out, errOut io.Writer) int {
 		return 1
 	}
 
-	clientOpts := ollama.Options{
+	clientOpts := llm.Options{
+		APIKey:      cfg.APIKey(),
 		Temperature: cfg.Temperature,
 		TopP:        cfg.TopP,
 		NumCtx:      cfg.NumCtx,
@@ -132,7 +135,7 @@ func runMain(args []string, in io.Reader, out, errOut io.Writer) int {
 	} else {
 		clientOpts.Stream = false
 	}
-	client := ollama.NewClient(cfg.Endpoint, cfg.Model, clientOpts)
+	client := newProvider(cfg, clientOpts)
 
 	// One scanner serves both the REPL and the patch prompt. Two would race for
 	// the same stdin and the second would lose whatever the first had buffered.
@@ -477,4 +480,13 @@ func showConfig(out io.Writer, cfg config.Config, cfgPath string, bot stepper) {
 	if err := enc.Encode(cfg); err != nil {
 		fmt.Fprintf(out, "\033[31mError: %v\033[0m\n", err)
 	}
+}
+
+// newProvider builds the client for the configured wire format. The agent takes
+// a Chatter, so which one it is stops mattering past this line.
+func newProvider(cfg config.Config, opts llm.Options) agent.Chatter {
+	if cfg.Provider == config.ProviderOpenAI {
+		return openai.NewClient(cfg.Endpoint, cfg.Model, opts)
+	}
+	return ollama.NewClient(cfg.Endpoint, cfg.Model, opts)
 }
