@@ -1,0 +1,1 @@
+Rename the function Greet to Salutation, at its definition and at every call site.

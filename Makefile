@@ -5,7 +5,7 @@ DOCKER_IMAGE=metron-test
 
 .PHONY: build install test race cover vet fmt lint check \
         docker-build docker-test docker-race docker-cover test-live \
-        release-check release-snapshot clean
+        release-check release-snapshot bench clean
 
 # ---------------------------------------------------------------- build ----
 
@@ -80,6 +80,20 @@ docker-cover: docker-build
 	docker run --rm $(DOCKER_IMAGE) sh -c \
 	  "go test -tags=integration -covermode=count -coverprofile=/tmp/c.out ./... && \
 	   go tool cover -func=/tmp/c.out | tail -1"
+
+# ---------------------------------------------------------- benchmark -----
+# Measures metron over bench/tasks against the models and edit formats in
+# bench/matrix.json, and writes bench/results/<date>.json.
+#
+# Deliberately NOT part of `check` or `test`: it needs a live Ollama server
+# with real models pulled, and it takes minutes per cell. Cells whose model is
+# not installed are skipped, not failed. Pass extra flags in BENCH_FLAGS, e.g.
+#   make bench BENCH_FLAGS="-only large-file-edit -reps 1 -keep"
+
+BENCH_FLAGS?=
+
+bench: build
+	go run ./cmd/metron-bench -bin bin/$(BINARY_NAME) $(BENCH_FLAGS)
 
 # ------------------------------------------------------- tests (live) ------
 # Talks to a real Ollama server with a real model. Set METRON_TEST_MODEL to

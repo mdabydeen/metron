@@ -1,0 +1,9 @@
+{
+  "name": "no-such-symbol",
+  "tags": [
+    "honesty",
+    "negative"
+  ],
+  "timeout_seconds": 300,
+  "expect_no_changes": true
+}

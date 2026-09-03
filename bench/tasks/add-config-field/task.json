@@ -1,0 +1,8 @@
+{
+  "name": "add-config-field",
+  "tags": [
+    "edit",
+    "structured"
+  ],
+  "timeout_seconds": 300
+}

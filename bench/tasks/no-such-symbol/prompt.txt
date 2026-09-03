@@ -1,0 +1,1 @@
+Rename the function FrobnicateWidget to PolishWidget everywhere it appears.
