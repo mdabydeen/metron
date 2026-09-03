@@ -82,19 +82,30 @@ release:
     metron needs `rg`, Universal Ctags and `git` on PATH, plus a reachable Ollama
     server with a tool-capable model. It warns at startup about anything missing.
 
-brews:
+# Homebrew. GoReleaser 2.x deprecated `brews` (formulas) in favour of casks,
+# which is what Homebrew now wants for a pre-built binary rather than something
+# built from source. One consequence worth knowing: casks are macOS-only, so
+# Linux users install with `go install` or the tarball rather than with brew.
+homebrew_casks:
   - name: metron
     repository:
       owner: mdabydeen
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
-    directory: Formula
+    directory: Casks
     homepage: https://github.com/mdabydeen/metron
     description: A context-disciplined terminal coding agent for local models
     license: Apache-2.0
     dependencies:
-      - name: ripgrep
-      - name: universal-ctags
-      - name: git
-    test: |
-      assert_match "metron", shell_output("#{bin}/metron --version")
+      - formula: ripgrep
+      - formula: universal-ctags
+      - formula: git
+    # The release binaries are unsigned, so Gatekeeper quarantines them and the
+    # first run dies with "cannot be opened". Stripping the attribute on install
+    # is what makes `brew install` actually produce a runnable metron.
+    hooks:
+      post:
+        install: |
+          if system_command("/usr/bin/xattr", args: ["-h"], print_stderr: false).exit_status == 0
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/metron"]
+          end

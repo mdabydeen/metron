@@ -12,6 +12,10 @@ is pre-1.0, the minor version is bumped for breaking changes to configuration or
 
 - `go install github.com/mdabydeen/metron/cmd/metron@latest` now works: the module has a
   resolvable path and the command lives under `cmd/metron`.
+- Homebrew installs via a cask rather than a formula, following GoReleaser's deprecation of
+  `brews`. Casks are macOS-only, so Linux users install with `go install` or the release
+  tarball. The cask strips the Gatekeeper quarantine attribute on install, without which an
+  unsigned binary fails its first run.
 - Apache-2.0 license, contributor guide, security policy and code of conduct.
 - Prebuilt binaries for macOS and Linux on amd64 and arm64, published on tag, with a
   Homebrew tap.

@@ -1,39 +1,61 @@
-# Deliberately conservative. Every linter here is one this codebase already
-# passes, so a red lint job means a real regression rather than a backlog
-# someone has learned to ignore.
+# Every linter here is one this codebase passes, so a red lint job means a real
+# regression rather than a backlog someone has learned to ignore.
 #
-# Three more are wanted and not yet enabled, because each needs its exclusions
-# calibrated against metron's design by someone who can run it locally first:
+# `default: none` is deliberate. golangci-lint's `enable:` *adds* to its default
+# set rather than replacing it, so listing linters here without this line
+# silently turns on more than the list says -- which is exactly how this file
+# first shipped a red CI job.
 #
-#   errcheck  -- the REPL makes many unchecked fmt.Fprintf calls to an io.Writer.
-#                Checking them all is noise; excluding them wholesale is too
-#                broad. Needs a considered exclude-functions list.
-#   gosec     -- will flag G204 (subprocess with a variable argument) and G304
-#                (file opened from a variable). Both are metron's entire design:
-#                it shells out to rg/ctags/git with model-supplied arguments, and
-#                view_slice opens a model-supplied path. Enable once filesystem
-#                confinement lands, so the exclusions document a real boundary
-#                rather than waving the warning away.
-#   revive    -- its default set includes `exported`, which several tool
-#                functions would fail on for want of doc comments. Worth doing;
-#                it is a docs change, not a lint change.
+# Still wanted, still off:
+#
+#   gosec  -- will flag G204 (subprocess with a variable argument) and G304
+#             (file opened from a variable). Both are metron's entire design: it
+#             shells out to rg/ctags/git with model-supplied arguments, and
+#             view_slice opens a model-supplied path. Now that Env.resolve
+#             confines those paths there is a real boundary to point at, so the
+#             exclusions would document something true. Worth a PR of its own.
+#   revive -- its default set includes `exported`, which several functions would
+#             fail for want of doc comments. Worth doing; it is a docs change.
 version: "2"
 
 linters:
+  default: none
   enable:
+    - errcheck
     - govet
     - ineffassign
     - staticcheck
     - unused
     - misspell
 
+  settings:
+    errcheck:
+      exclude-functions:
+        # Terminal and progress output. metron writes to an io.Writer it does
+        # not own and has nowhere useful to report a failed write to: if stdout
+        # is gone, printing an error about stdout will not arrive either.
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+        # Deferred closes of files opened for reading, where there is no buffered
+        # write that could still fail. A close error here cannot change what was
+        # already read.
+        - (*os.File).Close
+        - (io.ReadCloser).Close
+
   exclusions:
     rules:
-      # Test helpers shim external binaries by writing shell scripts into a
-      # temp PATH; the constructed strings are the point.
+      # Test helpers shim external binaries by writing shell scripts into a temp
+      # PATH; the constructed strings are the point.
       - path: _test\.go
         linters:
           - misspell
+      # In a test, an unchecked error is either asserted on the next line or
+      # deliberately ignored to set up a failure. errcheck cannot tell the
+      # difference and t.Fatal already covers the ones that matter.
+      - path: _test\.go
+        linters:
+          - errcheck
 
 formatters:
   enable:

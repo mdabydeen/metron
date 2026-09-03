@@ -47,7 +47,7 @@ func (e Env) ViewSlice(path string, start, end int) (string, error) {
 	lineIdx := 1
 	for scanner.Scan() {
 		if lineIdx >= start && lineIdx <= end {
-			sb.WriteString(fmt.Sprintf("%5d | %s\n", lineIdx, clipLine(scanner.Text(), e.Budgets.MaxLineChars)))
+			fmt.Fprintf(&sb, "%5d | %s\n", lineIdx, clipLine(scanner.Text(), e.Budgets.MaxLineChars))
 		}
 		if lineIdx > end {
 			break

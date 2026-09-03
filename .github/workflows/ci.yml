@@ -90,6 +90,13 @@ jobs:
       # that matches the v2 schema in .golangci.yml. Pin it once a known-good
       # version has actually been run against this repo.
       - uses: golangci/golangci-lint-action@v8
+        with:
+          # Pinned, and kept in step with GOLANGCI_VERSION in the Makefile. The
+          # action installs the latest release by default, so a new golangci-lint
+          # can turn an untouched PR red -- which is how this job first failed,
+          # on a check that did not exist when the config was written. Bump it
+          # deliberately, having run that same version locally.
+          version: v2.13.2
 
   # Validates .goreleaser.yaml and exercises a full cross-platform build on
   # every PR, so a broken release config surfaces here instead of at tag time.

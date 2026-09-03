@@ -38,7 +38,17 @@ fmt:
 	gofmt -l -w .
 
 # Needs golangci-lint on PATH; CI runs this too.
+# GOLANGCI_VERSION must match the pin in .github/workflows/ci.yml: a newer
+# release can add checks and fail a PR that touched none of the code they cover.
+GOLANGCI_VERSION?=v2.13.2
+
 lint:
+	@have=$$(golangci-lint version 2>/dev/null | grep -o 'version [^ ]*' | cut -d' ' -f2); \
+	want=$$(echo $(GOLANGCI_VERSION) | tr -d v); \
+	if [ "$$have" != "$$want" ]; then \
+	  echo "warning: golangci-lint $$have on PATH, CI pins $$want"; \
+	  echo "         go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_VERSION)"; \
+	fi
 	golangci-lint run
 
 check: vet test race cover
