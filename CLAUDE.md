@@ -44,7 +44,7 @@ Single-binary CLI with three layers:
   - `ctags.go`: `FindSymbol` — lazily builds `.tags` via `ctags -R` (skipped if `.tags` already exists) and greps it for exact symbol matches.
   - `search.go`: `SearchText` — `rg -n --max-count=<per-file>`, with the overall match count capped in Go afterwards. Do not try to push the total budget into ripgrep: `-m` and `--max-count` are the same flag and it is per-file, which is why the original `--max-count=2 -m 10` silently enforced nothing.
   - `slice.go`: `ViewSlice` — reads a line range from one file, capped at `max_slice_lines`, output prefixed with `%5d | ` line numbers.
-  - `preflight.go`: `Preflight` (startup dependency check, including the BSD-vs-Universal ctags distinction) and `RebuildTags` (backs the `/tags` command).
+  - `preflight.go`: the canonical tool names (`ToolNames`), the dependency table, and one evaluation of it (`problems`) that both `Preflight` (operator warnings, including the BSD-vs-Universal ctags distinction) and `UnavailableTools` (what the agent may advertise) read from, so the two cannot disagree. Also `RebuildTags`, which backs `/tags`.
   - `missing.go`: `missingBinary` — turns a missing external binary into a message aimed at the *model* ("X is not installed, so <tool> is unavailable. Do not retry it; <alternative>"). This exists because a vague error made a live model retry `search_text` eight times and exhaust the turn budget. Keep tool-failure text actionable.
   - `patch.go`: `ApplyPatch` — applies a unified diff via `git apply --check` (dry run) then `git apply`, both fed the diff over stdin. Patch failures come back as *text* (so the model can read git's complaint and retry); only a missing `git` binary is returned as a Go error.
 
@@ -54,7 +54,7 @@ Single-binary CLI with three layers:
 - `dispatch` maps a `ToolCall.Function.Name` to the corresponding `internal/tools` function; unknown tool names and tool errors are returned as strings back into message history rather than as Go errors, so the model sees and can react to failures.
 - `Agent.Options` carries `MaxTurns`, `CompactThreshold` and the three tool budgets; `Agent.Reset` clears history back to the system prompt (backs `/reset`).
 - `compactContext` runs once a `Step` call finishes (i.e., after the model gives a final non-tool-call answer): any `tool`-role message over 400 chars whose content contains `" | "` (the `ViewSlice` line-number delimiter) is replaced with a placeholder. This is what keeps `ViewSlice` output from permanently bloating the conversation history across multiple user turns — it does not affect `search_text` or `find_symbol` output.
-- The four tool schemas (JSON Schema `parameters`) live in the package-level `toolDefs` slice and are passed to every `Chat` call. `maxTurns` bounds the loop.
+- The tool schemas live in the package-level `toolDefs` map, keyed by name. `New` computes the *advertised* subset once -- everything less what `Env.UnavailableTools` reports broken and less `Options.DisabledTools` -- and only those schemas are sent. Schemas are paid for on every `Chat` call, so an unusable tool is a standing cost; the system prompt is generated from the same subset, since naming a tool the model cannot call invites it to try. `dispatch` refuses an unadvertised call before running it, phrased like `missingBinary`.
 
 ### Adding a new tool
 

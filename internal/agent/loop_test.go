@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/mdabydeen/metron/internal/ollama"
+	"github.com/mdabydeen/metron/internal/tools"
 )
 
 // fakeChatter replays a scripted sequence of model replies and records the
@@ -59,7 +60,50 @@ func isolate(t *testing.T) string {
 	return dir
 }
 
+// equipped is isolate with stand-ins for every external binary on PATH, so the
+// agent finds nothing missing and advertises the full tool set.
+func equipped(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	t.Chdir(dir)
+	bin := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		"rg":    "exit 0\n",
+		"ctags": "case \"$1\" in --version) echo 'Universal Ctags 6.1.0'; exit 0;; esac\nexit 0\n",
+		"git": "case \"$1 $2\" in\n" +
+			"  \"rev-parse --is-inside-work-tree\") echo true; exit 0;;\n" +
+			"  \"rev-parse --show-toplevel\") pwd; exit 0;;\n" +
+			"esac\nexit 0\n",
+	} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", bin)
+	return dir
+}
+
+// fullAgent advertises every tool whatever the environment holds. Dispatch
+// tests are about routing and about failures being reported as text the model
+// can read; which tools are on offer is a separate question, covered by the
+// advertisement tests.
+func fullAgent(client Chatter, opts Options) *Agent {
+	a := New(client, opts)
+	a.advertised = tools.ToolNames
+	a.schemas = a.schemas[:0]
+	for _, name := range tools.ToolNames {
+		a.schemas = append(a.schemas, toolDefs[name])
+	}
+	a.unavailable = nil
+	a.messages[0].Content = systemPrompt(tools.ToolNames)
+	return a
+}
+
 func TestNewSeedsSystemPrompt(t *testing.T) {
+	equipped(t)
 	a := New(&fakeChatter{}, DefaultOptions())
 
 	if len(a.messages) != 1 || a.messages[0].Role != "system" {
@@ -94,6 +138,7 @@ func TestStepReturnsAnswerWithoutToolCalls(t *testing.T) {
 }
 
 func TestStepAdvertisesEveryTool(t *testing.T) {
+	equipped(t)
 	fake := &fakeChatter{}
 	if _, err := New(fake, DefaultOptions()).Step(context.Background(), "hi"); err != nil {
 		t.Fatal(err)
@@ -232,7 +277,7 @@ func TestDispatchRoutesToolsAndReportsErrors(t *testing.T) {
 		"Alpha\tsample.go\t/^Alpha$/;\"\tkind:func\tline:1\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	a := New(&fakeChatter{}, DefaultOptions())
+	a := fullAgent(&fakeChatter{}, DefaultOptions())
 
 	tests := []struct {
 		name string
@@ -260,7 +305,7 @@ func TestDispatchRoutesToolsAndReportsErrors(t *testing.T) {
 
 func TestDispatchFindSymbolReportsToolError(t *testing.T) {
 	isolate(t) // no .tags and no ctags binary
-	a := New(&fakeChatter{}, DefaultOptions())
+	a := fullAgent(&fakeChatter{}, DefaultOptions())
 
 	got := a.dispatch(toolCall("find_symbol", map[string]any{"symbol": "Alpha"}).ToolCalls[0])
 	if !strings.HasPrefix(got, "Error:") {
@@ -431,7 +476,7 @@ func TestResetClearsHistoryButKeepsTheSystemPrompt(t *testing.T) {
 	if len(a.messages) != 1 || a.messages[0].Role != "system" {
 		t.Fatalf("history after Reset = %+v, want only the system prompt", a.messages)
 	}
-	if a.messages[0].Content != systemPrompt {
+	if a.messages[0].Content != systemPrompt(a.advertised) {
 		t.Fatal("Reset did not restore the system prompt")
 	}
 
@@ -451,7 +496,7 @@ func TestDispatchWritesProgressToTheConfiguredWriter(t *testing.T) {
 	var progress bytes.Buffer
 	opts := DefaultOptions()
 	opts.Progress = &progress
-	a := New(&fakeChatter{}, opts)
+	a := fullAgent(&fakeChatter{}, opts)
 
 	a.dispatch(toolCall("find_symbol", map[string]any{"symbol": "Greet"}).ToolCalls[0])
 
@@ -462,7 +507,7 @@ func TestDispatchWritesProgressToTheConfiguredWriter(t *testing.T) {
 
 func TestDispatchDiscardsProgressWhenNoWriterIsSet(t *testing.T) {
 	isolate(t)
-	a := New(&fakeChatter{}, DefaultOptions())
+	a := fullAgent(&fakeChatter{}, DefaultOptions())
 
 	// The nil-writer path must not panic and must not reach for stdout.
 	if got := a.dispatch(toolCall("find_symbol", map[string]any{"symbol": "X"}).ToolCalls[0]); got == "" {
@@ -480,7 +525,7 @@ func TestDispatchAsksBeforeApplyingAPatch(t *testing.T) {
 		seen = diff
 		return false
 	}
-	a := New(&fakeChatter{}, opts)
+	a := fullAgent(&fakeChatter{}, opts)
 
 	got := a.dispatch(toolCall("apply_patch", map[string]any{"diff": "--- a/x\n+++ b/x\n"}).ToolCalls[0])
 
@@ -744,5 +789,111 @@ func TestLastUsageResetsBetweenTurns(t *testing.T) {
 	usage, _ := a.LastUsage()
 	if usage.PromptTokens != 7 || usage.GenTokens != 3 {
 		t.Fatalf("LastUsage() = %+v, want only the most recent turn", usage)
+	}
+}
+
+func TestNewAdvertisesOnlyUsableTools(t *testing.T) {
+	isolate(t) // nothing on PATH: only view_slice can run
+
+	a := New(&fakeChatter{}, DefaultOptions())
+
+	names, schemaBytes := a.AdvertisedTools()
+	if len(names) != 1 || names[0] != tools.ToolViewSlice {
+		t.Fatalf("AdvertisedTools() = %v, want only view_slice", names)
+	}
+	if schemaBytes <= 0 {
+		t.Fatalf("AdvertisedTools() schema bytes = %d, want the cost reported", schemaBytes)
+	}
+	// The prompt must not name tools the model has no schema for; doing so
+	// spends tokens describing what it cannot call, and invites it to try.
+	for _, absent := range []string{tools.ToolFindSymbol, tools.ToolSearchText, tools.ToolApplyPatch} {
+		if strings.Contains(a.messages[0].Content, absent) {
+			t.Errorf("system prompt names %q, which is not advertised:\n%s", absent, a.messages[0].Content)
+		}
+	}
+}
+
+func TestStepSendsOnlyTheAdvertisedSchemas(t *testing.T) {
+	isolate(t)
+	fake := &fakeChatter{}
+
+	if _, err := New(fake, DefaultOptions()).Step(context.Background(), "hi"); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(fake.tools) != 1 {
+		t.Fatalf("sent %d schemas, want only the usable one", len(fake.tools))
+	}
+}
+
+func TestDisabledToolsAreNotAdvertised(t *testing.T) {
+	equipped(t)
+	opts := DefaultOptions()
+	opts.DisabledTools = []string{tools.ToolApplyPatch, tools.ToolSearchText}
+
+	a := New(&fakeChatter{}, opts)
+
+	names, _ := a.AdvertisedTools()
+	for _, name := range names {
+		if name == tools.ToolApplyPatch || name == tools.ToolSearchText {
+			t.Fatalf("AdvertisedTools() = %v, want the disabled tools withheld", names)
+		}
+	}
+	if len(names) != 3 {
+		t.Fatalf("AdvertisedTools() = %v, want the remaining three", names)
+	}
+}
+
+func TestDispatchRefusesAToolThatWasNotAdvertised(t *testing.T) {
+	isolate(t)
+	a := New(&fakeChatter{}, DefaultOptions())
+
+	// The schema was never sent, but a model can still invent the call. It must
+	// be turned down before it runs, and told not to try again.
+	got := a.dispatch(toolCall("search_text", map[string]any{"pattern": "x"}).ToolCalls[0])
+
+	if !strings.Contains(got, "unavailable in this project") {
+		t.Fatalf("dispatch() = %q, want a refusal naming the cause", got)
+	}
+	if !strings.Contains(got, "Do not retry") {
+		t.Fatalf("dispatch() = %q, want the model told not to retry", got)
+	}
+}
+
+func TestDispatchRefusesADisabledTool(t *testing.T) {
+	equipped(t)
+	opts := DefaultOptions()
+	opts.DisabledTools = []string{tools.ToolSearchText}
+	a := New(&fakeChatter{}, opts)
+
+	got := a.dispatch(toolCall("search_text", map[string]any{"pattern": "x"}).ToolCalls[0])
+
+	if !strings.Contains(got, "disabled by the operator") {
+		t.Fatalf("dispatch() = %q, want the refusal to distinguish a choice from a missing binary", got)
+	}
+}
+
+func TestResetKeepsTheAdvertisedPrompt(t *testing.T) {
+	isolate(t)
+	a := New(&fakeChatter{}, DefaultOptions())
+	seeded := a.messages[0].Content
+
+	if _, err := a.Step(context.Background(), "hi"); err != nil {
+		t.Fatal(err)
+	}
+	a.Reset()
+
+	if len(a.messages) != 1 || a.messages[0].Content != seeded {
+		t.Fatalf("Reset() prompt = %q, want the advertised set preserved", a.messages[0].Content)
+	}
+}
+
+func TestSystemPromptNumbersDirectivesContinuously(t *testing.T) {
+	got := systemPrompt([]string{tools.ToolViewSlice, tools.ToolApplyPatch})
+
+	for _, want := range []string{"1. NEVER guess", "2. Use 'view_slice'", "3. Use 'apply_patch'", "4. Report what changed"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("systemPrompt() = %q, missing %q", got, want)
+		}
 	}
 }

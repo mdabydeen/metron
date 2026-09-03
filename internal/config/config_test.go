@@ -3,8 +3,11 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/mdabydeen/metron/internal/tools"
 )
 
 // isolate removes every source of configuration so a test starts from a known
@@ -36,7 +39,7 @@ func TestLoadWithoutAnyConfigFile(t *testing.T) {
 	if path != "" {
 		t.Fatalf("path = %q, want empty when no file exists", path)
 	}
-	if cfg != Defaults() {
+	if !reflect.DeepEqual(cfg, Defaults()) {
 		t.Fatalf("Load() = %+v, want the defaults", cfg)
 	}
 }
@@ -270,4 +273,31 @@ func TestSearchOrder(t *testing.T) {
 			t.Fatalf("Search() = %v, want the second entry to be %q", got, want)
 		}
 	})
+}
+
+func TestValidateRejectsUnknownDisabledTools(t *testing.T) {
+	cfg := Defaults()
+	cfg.DisabledTools = []string{"view_slice", "vieuw_slice"}
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() = nil, want a typo in disabled_tools rejected")
+	}
+	// A silently-ignored typo would leave the tool enabled, which is the
+	// opposite of what the operator asked for.
+	if !strings.Contains(err.Error(), "vieuw_slice") {
+		t.Fatalf("Validate() error = %v, want it to name the unknown tool", err)
+	}
+	if !strings.Contains(err.Error(), "view_slice") {
+		t.Fatalf("Validate() error = %v, want it to list the known tools", err)
+	}
+}
+
+func TestValidateAcceptsEveryKnownTool(t *testing.T) {
+	cfg := Defaults()
+	cfg.DisabledTools = append([]string{}, tools.ToolNames...)
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() = %v, want every known tool name accepted", err)
+	}
 }

@@ -18,5 +18,7 @@
   "search_max_per_file": 2,
   "list_max_entries": 60,
 
+  "disabled_tools": [],
+
   "auto_approve_patches": false
 }

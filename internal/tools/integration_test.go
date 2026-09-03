@@ -52,7 +52,7 @@ func TestIntegrationPreflightPassesWithRealBinaries(t *testing.T) {
 	requireBinary(t, "git")
 	initRepo(t)
 
-	if got := Preflight(); len(got) != 0 {
+	if got := defaultEnv(t).Preflight(); len(got) != 0 {
 		t.Fatalf("Preflight() = %v, want no warnings in the integration image", got)
 	}
 }
@@ -65,7 +65,7 @@ func TestIntegrationPreflightDetectsANonRepository(t *testing.T) {
 
 	// Real git, real non-repository: the shim tests cannot prove that
 	// `rev-parse --is-inside-work-tree` actually behaves this way.
-	got := Preflight()
+	got := defaultEnv(t).Preflight()
 	if len(got) != 1 || !strings.Contains(got[0], "not a git repository") {
 		t.Fatalf("Preflight() = %v, want the not-a-repository warning", got)
 	}

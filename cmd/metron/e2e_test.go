@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -31,11 +32,24 @@ func TestEndToEndPatchSession(t *testing.T) {
 	if err := os.WriteFile("greet.go", []byte(source), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// A pre-built .tags file keeps the test independent of the host's ctags.
+	// A pre-built .tags file keeps the test independent of the host's ctags --
+	// but find_symbol is only advertised when a *Universal* ctags is on PATH, so
+	// a shim answering --version is prepended. It is never invoked for anything
+	// else, since .tags already exists. The rest of PATH is kept, because git is
+	// used for real here.
 	if err := os.WriteFile(".tags", []byte(
 		"Greet\tgreet.go\t/^func Greet$/;\"\tkind:func\tline:3\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	shimBin := filepath.Join(dir, "shim-bin")
+	if err := os.MkdirAll(shimBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(shimBin, "ctags"),
+		[]byte("#!/bin/sh\necho 'Universal Ctags 6.1.0'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", shimBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	for _, args := range [][]string{
 		{"init", "-q"},
 		{"config", "user.email", "test@example.com"},

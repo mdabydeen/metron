@@ -10,7 +10,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+
+	"github.com/mdabydeen/metron/internal/tools"
 )
 
 // Config is the full set of tunable settings. Every field maps to a value that
@@ -42,6 +45,12 @@ type Config struct {
 	SearchMaxPerFile int `json:"search_max_per_file"`
 	ListMaxEntries   int `json:"list_max_entries"`
 
+	// Tools
+	// DisabledTools names tools to withhold from the model. Their schemas are
+	// then not sent at all, which is a saving on every request rather than only
+	// on the turns that would have used them.
+	DisabledTools []string `json:"disabled_tools"`
+
 	// Safety
 	AutoApprovePatches bool `json:"auto_approve_patches"`
 }
@@ -64,6 +73,7 @@ func Defaults() Config {
 		SearchMaxMatches:   10,
 		SearchMaxPerFile:   2,
 		ListMaxEntries:     60,
+		DisabledTools:      []string{},
 		AutoApprovePatches: false,
 	}
 }
@@ -166,6 +176,14 @@ func (c Config) Validate() error {
 	}
 	if c.TopP <= 0 || c.TopP > 1 {
 		problems = append(problems, fmt.Sprintf("top_p must be in (0, 1] (got %v)", c.TopP))
+	}
+	// A typo here would silently leave a tool enabled, which is the opposite of
+	// what the operator asked for -- so it is an error, like an unknown key.
+	for _, name := range c.DisabledTools {
+		if !slices.Contains(tools.ToolNames, name) {
+			problems = append(problems, fmt.Sprintf("disabled_tools: unknown tool %q (known: %s)",
+				name, strings.Join(tools.ToolNames, ", ")))
+		}
 	}
 	if len(problems) > 0 {
 		return fmt.Errorf("invalid config: %s", strings.Join(problems, "; "))

@@ -195,6 +195,7 @@ cp metron.example.json .metron.json
 | `search_max_matches` | `10` | total `search_text` results |
 | `search_max_per_file` | `2` | `search_text` results per file |
 | `list_max_entries` | `60` | paths `list_files` will return |
+| `disabled_tools` | `[]` | tool names to withhold from the model entirely |
 
 A file that exists but cannot be read or parsed is a startup error, not a silent fallback —
 including unknown keys, so a typo like `"modle"` is reported instead of ignored. Values are
@@ -230,10 +231,34 @@ OLLAMA_MODEL=gemma4:12b-mlx metron
 `/config` inside the REPL prints the result of all of this, so you never have to guess which
 layer won.
 
+### Which tools get offered
+
+metron only advertises tools that can actually run. A missing ripgrep withdraws `list_files`
+and `search_text`; a BSD `ctags` withdraws `find_symbol`; running outside a git repository
+withdraws `apply_patch`. `disabled_tools` withdraws whatever you name, and an unknown name
+there is a startup error rather than a silent no-op.
+
+This is a budget, not just tidiness. **Tool schemas are sent with every single request**, so
+an unusable tool is a tax on every turn — and naming it in the system prompt invites the
+model to call it and waste a turn finding out. `/config` reports both the set and its cost:
+
+```
+tools: list_files, find_symbol, search_text, view_slice, apply_patch (1150 schema bytes, ~287 tokens per request)
+```
+
+On a Mac with no ripgrep and the system ctags, that same line reads:
+
+```
+tools: view_slice, apply_patch (493 schema bytes, ~123 tokens per request)
+```
+
+If the model calls a tool that was not advertised, the call is refused before it runs, with a
+message telling it not to retry.
+
 ## The tools
 
-Five tools, each a standalone function in `internal/tools` with no shared state. This is the
-complete surface the model has for touching your code.
+Five tools, all methods on the `tools.Env` that holds the project root and the budgets. This
+is the complete surface the model has for touching your code.
 
 ### `list_files(pattern)`
 

@@ -39,6 +39,7 @@ type stepper interface {
 	Reset()
 	HistorySize() (messages, bytes int)
 	LastUsage() (ollama.Usage, int)
+	AdvertisedTools() (names []string, schemaBytes int)
 }
 
 // exit is indirected so tests can exercise main without killing the process.
@@ -135,6 +136,7 @@ func runMain(args []string, in io.Reader, out, errOut io.Writer) int {
 		CompactThreshold:   cfg.CompactThreshold,
 		MaxHistoryMessages: cfg.MaxHistoryMessages,
 		Env:                env,
+		DisabledTools:      cfg.DisabledTools,
 		Progress:           out,
 	}
 	autoApprove := cfg.AutoApprovePatches || f.yes
@@ -152,7 +154,7 @@ func runMain(args []string, in io.Reader, out, errOut io.Writer) int {
 	bot := agent.New(client, opts)
 
 	if f.prompt != "" {
-		return oneShot(context.Background(), out, errOut, bot, f.prompt)
+		return oneShot(context.Background(), out, errOut, env, bot, f.prompt)
 	}
 
 	run(context.Background(), scanner, out, cfg, path, env, bot, streamed)
@@ -161,8 +163,8 @@ func runMain(args []string, in io.Reader, out, errOut io.Writer) int {
 
 // oneShot runs a single request and prints only the answer on stdout, so
 // `metron -p ... 2>/dev/null` is pipeable. Progress and warnings go to stderr.
-func oneShot(ctx context.Context, out, errOut io.Writer, bot stepper, prompt string) int {
-	for _, w := range tools.Preflight() {
+func oneShot(ctx context.Context, out, errOut io.Writer, env tools.Env, bot stepper, prompt string) int {
+	for _, w := range env.Preflight() {
 		fmt.Fprintf(errOut, "warning: %s\n", w)
 	}
 	resp, err := step(ctx, bot, prompt)
@@ -207,7 +209,7 @@ func run(ctx context.Context, scanner *bufio.Scanner, out io.Writer, cfg config.
 	if cfgPath != "" {
 		fmt.Fprintf(out, "config: %s\n", cfgPath)
 	}
-	for _, w := range tools.Preflight() {
+	for _, w := range env.Preflight() {
 		fmt.Fprintf(out, "\033[33mwarning: %s\033[0m\n", w)
 	}
 
@@ -310,7 +312,7 @@ func command(out io.Writer, input string, cfg config.Config, cfgPath string, env
 	case "/help":
 		fmt.Fprintln(out, helpText)
 	case "/config":
-		showConfig(out, cfg, cfgPath)
+		showConfig(out, cfg, cfgPath, bot)
 	case "/reset":
 		bot.Reset()
 		fmt.Fprintln(out, "Conversation history cleared.")
@@ -332,14 +334,31 @@ func command(out io.Writer, input string, cfg config.Config, cfgPath string, env
 	return false
 }
 
+// bytesPerToken is a rough conversion for reporting schema cost. Tokenisation
+// is model-specific and metron does not ship a tokeniser, so the figure is
+// labelled as an estimate rather than presented as a count.
+const bytesPerToken = 4
+
 // showConfig prints the effective settings, so an operator can tell at a glance
 // which file (if any) is in play and what the budgets actually are.
-func showConfig(out io.Writer, cfg config.Config, cfgPath string) {
+//
+// The advertised tool set is part of that picture: their schemas are sent with
+// every single request, so they are a standing cost, and which tools are
+// present depends on what is installed.
+func showConfig(out io.Writer, cfg config.Config, cfgPath string, bot stepper) {
 	source := cfgPath
 	if source == "" {
 		source = "built-in defaults (no config file found)"
 	}
 	fmt.Fprintf(out, "source: %s\n", source)
+
+	names, schemaBytes := bot.AdvertisedTools()
+	if len(names) == 0 {
+		fmt.Fprintln(out, "tools: none advertised")
+	} else {
+		fmt.Fprintf(out, "tools: %s (%d schema bytes, ~%d tokens per request)\n",
+			strings.Join(names, ", "), schemaBytes, schemaBytes/bytesPerToken)
+	}
 	enc := json.NewEncoder(out)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(cfg); err != nil {

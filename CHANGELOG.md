@@ -22,6 +22,15 @@ is pre-1.0, the minor version is bumped for breaking changes to configuration or
   symlinks included, for files being created as well as read.
 - metron can be started from any subdirectory of a project. Tools act on the project root
   rather than the process working directory, and `.tags` is written there.
+- Only tools that can actually run are advertised to the model. A missing ripgrep withdraws
+  `list_files` and `search_text`, a BSD `ctags` withdraws `find_symbol`, and running outside
+  a git repository withdraws `apply_patch`. Their schemas are then not sent at all, and the
+  system prompt stops naming them — on a stock Mac that is ~164 fewer prompt tokens on every
+  request. A call to an unadvertised tool is refused before it runs.
+- `disabled_tools` withholds tools by name. An unknown name is a startup error, since a typo
+  would otherwise leave the tool enabled.
+- `/config` reports the advertised tool set and the size of its schemas, because that cost is
+  paid on every request rather than only on the turns that use a tool.
 
 ### Changed
 

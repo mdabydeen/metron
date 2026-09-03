@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -44,6 +45,9 @@ type fakeStepper struct {
 	bytes   int
 	usage   ollama.Usage
 	calls   int
+
+	advertised  []string
+	schemaBytes int
 }
 
 func (f *fakeStepper) Step(ctx context.Context, userPrompt string) (string, error) {
@@ -59,6 +63,30 @@ func (f *fakeStepper) Reset() { f.resets++ }
 func (f *fakeStepper) HistorySize() (int, int) { return f.msgs, f.bytes }
 
 func (f *fakeStepper) LastUsage() (ollama.Usage, int) { return f.usage, f.calls }
+
+func (f *fakeStepper) AdvertisedTools() ([]string, int) { return f.advertised, f.schemaBytes }
+
+// gitDir makes a scratch git repository the working directory. apply_patch is
+// only advertised inside a work tree, so any test that exercises the patch path
+// end to end needs one.
+func gitDir(t *testing.T) string {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir := t.TempDir()
+	t.Chdir(dir)
+	for _, args := range [][]string{
+		{"init", "-q"},
+		{"config", "user.email", "test@example.com"},
+		{"config", "user.name", "test"},
+	} {
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	return dir
+}
 
 // replFor wraps REPL input the way runMain does, since run reads from a shared
 // scanner rather than an io.Reader of its own.
@@ -393,7 +421,7 @@ func (w *jsonFailingWriter) Write(p []byte) (int, error) {
 func TestShowConfigReportsEncodingFailure(t *testing.T) {
 	var w jsonFailingWriter
 
-	showConfig(&w, config.Defaults(), "somewhere")
+	showConfig(&w, config.Defaults(), "somewhere", &fakeStepper{})
 
 	if !strings.Contains(w.buf.String(), "source: somewhere") {
 		t.Fatalf("output = %q, want the source line written", w.buf.String())
@@ -496,6 +524,7 @@ func (contextStepper) Step(ctx context.Context, _ string) (string, error) { retu
 func (contextStepper) Reset()                                             {}
 func (contextStepper) HistorySize() (int, int)                            { return 0, 0 }
 func (contextStepper) LastUsage() (ollama.Usage, int)                     { return ollama.Usage{}, 0 }
+func (contextStepper) AdvertisedTools() ([]string, int)                   { return nil, 0 }
 
 // signallingStepper raises a real SIGINT from inside the turn, which the
 // handler step installs is expected to intercept and turn into a cancellation
@@ -513,9 +542,10 @@ func (signallingStepper) Step(ctx context.Context, _ string) (string, error) {
 	<-ctx.Done()
 	return "", ctx.Err()
 }
-func (signallingStepper) Reset()                         {}
-func (signallingStepper) HistorySize() (int, int)        { return 0, 0 }
-func (signallingStepper) LastUsage() (ollama.Usage, int) { return ollama.Usage{}, 0 }
+func (signallingStepper) Reset()                           {}
+func (signallingStepper) HistorySize() (int, int)          { return 0, 0 }
+func (signallingStepper) LastUsage() (ollama.Usage, int)   { return ollama.Usage{}, 0 }
+func (signallingStepper) AdvertisedTools() ([]string, int) { return nil, 0 }
 
 func TestStepCancelsTheTurnOnInterrupt(t *testing.T) {
 	_, err := step(context.Background(), signallingStepper{}, "slow request")
@@ -526,8 +556,7 @@ func TestStepCancelsTheTurnOnInterrupt(t *testing.T) {
 }
 
 func TestRunMainWiresThePatchApprovalPrompt(t *testing.T) {
-	dir := t.TempDir()
-	t.Chdir(dir)
+	dir := gitDir(t)
 	t.Setenv("METRON_CONFIG", "")
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
@@ -597,7 +626,7 @@ func TestExampleConfigMatchesDefaults(t *testing.T) {
 	if used != path {
 		t.Fatalf("config.Load() used %q, want the example file", used)
 	}
-	if cfg != config.Defaults() {
+	if !reflect.DeepEqual(cfg, config.Defaults()) {
 		t.Fatalf("example config = %+v, want it to reproduce the defaults exactly", cfg)
 	}
 
@@ -795,8 +824,7 @@ func TestRunMainOneShotReportsFailuresOnStderr(t *testing.T) {
 }
 
 func TestRunMainOneShotRefusesPatchesWithoutYes(t *testing.T) {
-	dir := t.TempDir()
-	t.Chdir(dir)
+	dir := gitDir(t)
 	diff := "--- a/x.txt\n+++ b/x.txt\n@@ -1 +1 @@\n-a\n+b\n"
 	oneShotServer(t, []string{
 		`{"message":{"role":"assistant","tool_calls":[{"function":{"name":"apply_patch","arguments":` +
@@ -891,5 +919,30 @@ func TestRunMainStreamsIntoStdoutByDefault(t *testing.T) {
 	}
 	if strings.Count(out.String(), "streamed answer") != 1 {
 		t.Fatalf("stdout = %q, want the reply printed exactly once", out.String())
+	}
+}
+
+func TestCommandConfigReportsTheAdvertisedTools(t *testing.T) {
+	var out bytes.Buffer
+	bot := &fakeStepper{advertised: []string{"view_slice", "apply_patch"}, schemaBytes: 400}
+
+	command(&out, "/config", config.Defaults(), "", testEnv(t), bot)
+
+	// The schemas are sent with every request, so their cost is a standing one
+	// and worth showing next to the budgets it competes with.
+	for _, want := range []string{"view_slice, apply_patch", "400 schema bytes", "~100 tokens"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("/config output = %q, missing %q", out.String(), want)
+		}
+	}
+}
+
+func TestCommandConfigSaysWhenNoToolsAreAdvertised(t *testing.T) {
+	var out bytes.Buffer
+
+	command(&out, "/config", config.Defaults(), "", testEnv(t), &fakeStepper{})
+
+	if !strings.Contains(out.String(), "tools: none advertised") {
+		t.Fatalf("/config output = %q, want the empty tool set stated", out.String())
 	}
 }
