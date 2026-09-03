@@ -1030,3 +1030,116 @@ func TestDispatchReportsARunCommandFailure(t *testing.T) {
 		t.Fatalf("dispatch() = %q, want the empty command explained", got)
 	}
 }
+
+func TestEditFormatSelectsExactlyOneEditTool(t *testing.T) {
+	equipped(t)
+
+	for _, tc := range []struct {
+		format          string
+		want, withdrawn string
+	}{
+		{tools.FormatDiff, tools.ToolApplyPatch, tools.ToolEditFile},
+		{tools.FormatSearchReplace, tools.ToolEditFile, tools.ToolApplyPatch},
+	} {
+		opts := DefaultOptions()
+		opts.Env.EditFormat = tc.format
+		a := New(&fakeChatter{}, opts)
+
+		names, _ := a.AdvertisedTools()
+		var sawWanted, sawWithdrawn bool
+		for _, n := range names {
+			sawWanted = sawWanted || n == tc.want
+			sawWithdrawn = sawWithdrawn || n == tc.withdrawn
+		}
+		// The two do the same job. Advertising both would pay for two schemas
+		// on every request and invite the model to pick the wrong one.
+		if !sawWanted {
+			t.Errorf("edit_format %q advertised %v, want %s present", tc.format, names, tc.want)
+		}
+		if sawWithdrawn {
+			t.Errorf("edit_format %q advertised %v, want %s withheld", tc.format, names, tc.withdrawn)
+		}
+	}
+}
+
+func TestDispatchRefusesTheUnselectedEditToolWithTheAlternative(t *testing.T) {
+	equipped(t)
+	opts := DefaultOptions()
+	opts.Env.EditFormat = tools.FormatSearchReplace
+	a := New(&fakeChatter{}, opts)
+
+	got := a.dispatch(context.Background(), toolCall("apply_patch", map[string]any{"diff": "x"}).ToolCalls[0])
+
+	if !strings.Contains(got, "edit_file") {
+		t.Fatalf("dispatch() = %q, want the refusal to name the tool that does work", got)
+	}
+}
+
+func TestDispatchEditFileShowsTheOperatorADiff(t *testing.T) {
+	dir := equipped(t)
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("one\ntwo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var kind, preview string
+	opts := DefaultOptions()
+	opts.Env.EditFormat = tools.FormatSearchReplace
+	opts.Approve = func(k, p string) bool {
+		kind, preview = k, p
+		return false
+	}
+	a := New(&fakeChatter{}, opts)
+
+	got := a.dispatch(context.Background(),
+		toolCall("edit_file", map[string]any{"path": "a.go", "search": "two", "replace": "TWO"}).ToolCalls[0])
+
+	// The format exists to make the model's job easier; it must not make the
+	// operator's job harder, so they still approve a unified diff.
+	if kind != "patch" {
+		t.Errorf("approver saw kind %q, want it presented as a patch", kind)
+	}
+	for _, want := range []string{"--- a/a.go", "-two", "+TWO"} {
+		if !strings.Contains(preview, want) {
+			t.Errorf("approver saw %q, missing %q", preview, want)
+		}
+	}
+	if !strings.Contains(got, "rejected by the operator") {
+		t.Fatalf("dispatch() = %q, want the refusal reported", got)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "a.go")); string(b) != "one\ntwo\n" {
+		t.Fatal("a rejected edit modified the file")
+	}
+}
+
+func TestDispatchEditFileAppliesWhenApproved(t *testing.T) {
+	dir := equipped(t)
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("one\ntwo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	opts := DefaultOptions()
+	opts.Env.EditFormat = tools.FormatSearchReplace
+	a := New(&fakeChatter{}, opts)
+
+	got := a.dispatch(context.Background(),
+		toolCall("edit_file", map[string]any{"path": "a.go", "search": "two", "replace": "TWO"}).ToolCalls[0])
+
+	if !strings.Contains(got, "Edited a.go") {
+		t.Fatalf("dispatch() = %q, want the edit applied", got)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "a.go")); string(b) != "one\nTWO\n" {
+		t.Fatalf("file = %q, want the edit on disk", b)
+	}
+}
+
+func TestSystemPromptNamesTheSelectedEditToolOnly(t *testing.T) {
+	equipped(t)
+	opts := DefaultOptions()
+	opts.Env.EditFormat = tools.FormatSearchReplace
+	a := New(&fakeChatter{}, opts)
+
+	if strings.Contains(a.messages[0].Content, "apply_patch") {
+		t.Fatalf("system prompt names apply_patch when it is not advertised:\n%s", a.messages[0].Content)
+	}
+	if !strings.Contains(a.messages[0].Content, "edit_file") {
+		t.Fatalf("system prompt omits edit_file:\n%s", a.messages[0].Content)
+	}
+}

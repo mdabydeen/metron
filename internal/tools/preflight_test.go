@@ -213,7 +213,51 @@ func TestUnavailableToolsIsEmptyWhenEverythingIsPresent(t *testing.T) {
 	// available once the operator has allowed something.
 	env.Allowed = ParseAllowlist([]string{"go test"})
 
-	if got := env.UnavailableTools(); len(got) != 0 {
-		t.Fatalf("UnavailableTools() = %v, want nothing unavailable", got)
+	// The two edit tools are alternatives, so one of them is always withheld;
+	// everything else should be available.
+	got := env.UnavailableTools()
+	delete(got, ToolEditFile)
+	if len(got) != 0 {
+		t.Fatalf("UnavailableTools() = %v, want nothing else unavailable", got)
+	}
+}
+
+func TestUnavailableToolsWithholdsTheUnselectedEditTool(t *testing.T) {
+	workdir(t)
+
+	for _, tc := range []struct{ format, withheld, offered string }{
+		{FormatDiff, ToolEditFile, "apply_patch"},
+		{FormatSearchReplace, ToolApplyPatch, "edit_file"},
+	} {
+		env := NewEnv(DefaultBudgets())
+		env.EditFormat = tc.format
+
+		got := env.UnavailableTools()
+		reason, withheld := got[tc.withheld]
+		if !withheld {
+			t.Errorf("edit_format %q: %s was not withheld", tc.format, tc.withheld)
+			continue
+		}
+		// The refusal has to name the tool that does work, or the model has
+		// nowhere to go.
+		if !strings.Contains(reason, tc.offered) {
+			t.Errorf("edit_format %q: reason %q does not name %s", tc.format, reason, tc.offered)
+		}
+	}
+}
+
+func TestUnavailableToolsDefaultsToDiffForAZeroEnv(t *testing.T) {
+	workdir(t)
+
+	got := (Env{}).UnavailableTools()
+
+	// An empty EditFormat must mean diff, so edit_file is the one withheld.
+	// apply_patch may still be withheld here for wanting a git repository --
+	// a different reason, and not the one under test.
+	if _, withheld := got[ToolEditFile]; !withheld {
+		t.Fatalf("UnavailableTools() = %v, want edit_file withheld for a zero Env", got)
+	}
+	if reason := got[ToolApplyPatch]; strings.Contains(reason, "edit_format") {
+		t.Fatalf("apply_patch withheld as %q; an empty EditFormat should mean diff", reason)
 	}
 }

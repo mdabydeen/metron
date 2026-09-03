@@ -57,6 +57,13 @@ type Config struct {
 	// a decision an operator makes rather than one they forget to unmake.
 	AllowedCommands []string `json:"allowed_commands"`
 
+	// EditFormat picks how the model expresses a change: "diff" (apply_patch,
+	// a unified diff) or "search_replace" (edit_file, an anchored quote).
+	// Unified diffs need exact line numbers, which is the thing small models
+	// most reliably get wrong; search_replace asks them to quote lines they
+	// have already read instead.
+	EditFormat string `json:"edit_format"`
+
 	CommandTimeoutSeconds int `json:"command_timeout_seconds"`
 	MaxCommandOutputBytes int `json:"max_command_output_bytes"`
 
@@ -84,6 +91,7 @@ func Defaults() Config {
 		ListMaxEntries:     60,
 		DisabledTools:      []string{},
 
+		EditFormat:            tools.FormatDiff,
 		AllowedCommands:       []string{},
 		CommandTimeoutSeconds: 120,
 		MaxCommandOutputBytes: 4000,
@@ -200,6 +208,10 @@ func (c Config) Validate() error {
 			problems = append(problems, fmt.Sprintf("disabled_tools: unknown tool %q (known: %s)",
 				name, strings.Join(tools.ToolNames, ", ")))
 		}
+	}
+	if !slices.Contains(tools.EditFormats, c.EditFormat) {
+		problems = append(problems, fmt.Sprintf("edit_format must be one of %s (got %q)",
+			strings.Join(tools.EditFormats, ", "), c.EditFormat))
 	}
 	// A blank entry would match every argv prefix of length zero -- that is, all
 	// of them -- turning a typo into "run anything".

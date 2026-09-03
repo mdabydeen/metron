@@ -93,6 +93,7 @@ var toolDirectives = map[string]string{
 	tools.ToolSearchText: "Use 'search_text' for text patterns.",
 	tools.ToolViewSlice:  "Use 'view_slice' to view at most 20-60 relevant lines.",
 	tools.ToolApplyPatch: "Use 'apply_patch' with a valid git unified diff (--- a/... +++ b/...) to execute changes.",
+	tools.ToolEditFile:   "Use 'edit_file' to change code: quote the exact lines to replace in 'search'. No line numbers.",
 	tools.ToolRunCommand: "Use 'run_command' to check your work; only the operator's allowed commands will run.",
 }
 
@@ -248,6 +249,28 @@ var toolDefs = map[string]ollama.Tool{
 			},
 		},
 	},
+	tools.ToolEditFile: {
+		Type: "function",
+		Function: map[string]any{
+			"name": "edit_file",
+			// Every word here is paid for on every request, so the description
+			// carries only what the model gets wrong without it: quote verbatim,
+			// match exactly once, and the two empty-string special cases.
+			"description": "Replace lines in a file. 'search' quotes the lines to replace verbatim; " +
+				"it is matched, not numbered, so it must occur exactly once -- quote more " +
+				"surrounding lines if it would not. Empty 'replace' deletes them. " +
+				"Empty 'search' creates the file from 'replace'.",
+			"parameters": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"path":    map[string]any{"type": "string"},
+					"search":  map[string]any{"type": "string"},
+					"replace": map[string]any{"type": "string"},
+				},
+				"required": []string{"path", "search", "replace"},
+			},
+		},
+	},
 	tools.ToolRunCommand: {
 		Type: "function",
 		Function: map[string]any{
@@ -370,6 +393,17 @@ func (a *Agent) dispatch(ctx context.Context, call ollama.ToolCall) string {
 			return fmt.Sprintf("Error: %v", err)
 		}
 		return res
+	case "edit_file":
+		path, _ := args["path"].(string)
+		search, _ := args["search"].(string)
+		replace, _ := args["replace"].(string)
+		// The operator is shown a unified diff, never a search/replace block:
+		// the format exists to make the model's job easier, and should not make
+		// the human's job harder.
+		if a.opts.Approve != nil && !a.opts.Approve("patch", a.opts.Env.EditPreview(path, search, replace)) {
+			return "Edit rejected by the operator. Do not retry; describe the change instead."
+		}
+		return a.opts.Env.EditFile(path, search, replace)
 	case "run_command":
 		command, _ := args["command"].(string)
 		if a.opts.Approve != nil && !a.opts.Approve("command", command) {

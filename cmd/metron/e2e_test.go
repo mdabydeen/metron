@@ -210,3 +210,79 @@ func TestEndToEndRunCommandSession(t *testing.T) {
 		t.Fatalf("tool results %q missing the verified command output", joined)
 	}
 }
+
+// TestEndToEndSearchReplaceSession drives a full session in the search/replace
+// edit format. The point of the format is that the model never has to produce a
+// line number or a hunk header -- it quotes lines it has already read -- so the
+// scripted reply here contains neither.
+func TestEndToEndSearchReplaceSession(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	source := "package main\n\nfunc Greet() string {\n\treturn \"hello\"\n}\n"
+	if err := os.WriteFile("greet.go", []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	script := []string{
+		`{"message":{"role":"assistant","tool_calls":[{"function":{"name":"view_slice",
+			"arguments":{"path":"greet.go","start":1,"end":5}}}]},"done":true}`,
+		`{"message":{"role":"assistant","tool_calls":[{"function":{"name":"edit_file","arguments":` +
+			mustJSON(t, map[string]any{
+				"path":    "greet.go",
+				"search":  "\treturn \"hello\"",
+				"replace": "\treturn \"hola\"",
+			}) + `}}]},"done":true}`,
+		`{"message":{"role":"assistant","content":"Greet now returns hola."},"done":true}`,
+	}
+
+	var turn int
+	var toolResults []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req ollama.ChatRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		for _, m := range req.Messages {
+			if m.Role == "tool" {
+				toolResults = append(toolResults, m.Content)
+			}
+		}
+		if turn >= len(script) {
+			t.Errorf("model called %d times, script has %d", turn+1, len(script))
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write([]byte(script[turn]))
+		turn++
+	}))
+	defer srv.Close()
+
+	env := tools.NewEnv(tools.DefaultBudgets())
+	env.EditFormat = tools.FormatSearchReplace
+	opts := agent.DefaultOptions()
+	opts.Env = env
+	bot := agent.New(ollama.NewClient(srv.URL+"/api/chat", "m", ollama.DefaultOptions()), opts)
+
+	var out bytes.Buffer
+	cfg := config.Defaults()
+	cfg.EditFormat = tools.FormatSearchReplace
+	run(context.Background(), bufio.NewScanner(strings.NewReader("make Greet say hola\nexit\n")),
+		&out, cfg, "", env, bot, false)
+
+	if turn != len(script) {
+		t.Fatalf("model called %d times, want %d", turn, len(script))
+	}
+	b, err := os.ReadFile("greet.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `return "hola"`) {
+		t.Fatalf("greet.go = %q, want the edit applied on disk", b)
+	}
+	// git is never invoked in this format, so the whole edit path works in a
+	// directory that is not a repository at all.
+	if _, err := os.Stat(filepath.Join(dir, ".git")); !os.IsNotExist(err) {
+		t.Fatal("expected no git repository in this test")
+	}
+	if !strings.Contains(strings.Join(toolResults, "\n"), "Edited greet.go") {
+		t.Fatalf("tool results %q missing the edit confirmation", toolResults)
+	}
+}

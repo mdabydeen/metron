@@ -135,6 +135,7 @@ func runMain(args []string, in io.Reader, out, errOut io.Writer) int {
 		MaxCommandOutputBytes: cfg.MaxCommandOutputBytes,
 	})
 	env.Allowed = tools.ParseAllowlist(cfg.AllowedCommands)
+	env.EditFormat = cfg.EditFormat
 	opts := agent.Options{
 		MaxTurns:           cfg.MaxTurns,
 		CompactThreshold:   cfg.CompactThreshold,

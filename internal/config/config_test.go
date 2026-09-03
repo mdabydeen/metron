@@ -333,3 +333,24 @@ func TestValidateRejectsNonPositiveCommandBudgets(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateRejectsAnUnknownEditFormat(t *testing.T) {
+	cfg := Defaults()
+	cfg.EditFormat = "unified"
+
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "edit_format") {
+		t.Fatalf("Validate() error = %v, want an unknown edit_format rejected", err)
+	}
+	if !strings.Contains(err.Error(), "search_replace") {
+		t.Fatalf("Validate() error = %v, want the valid values listed", err)
+	}
+}
+
+func TestDefaultsUseTheDiffEditFormat(t *testing.T) {
+	// The default stays on diffs until the benchmark says otherwise; changing
+	// it is a decision that should come with numbers.
+	if got := Defaults().EditFormat; got != tools.FormatDiff {
+		t.Fatalf("Defaults().EditFormat = %q, want %q", got, tools.FormatDiff)
+	}
+}

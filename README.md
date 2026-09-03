@@ -196,6 +196,7 @@ cp metron.example.json .metron.json
 | `search_max_per_file` | `2` | `search_text` results per file |
 | `list_max_entries` | `60` | paths `list_files` will return |
 | `disabled_tools` | `[]` | tool names to withhold from the model entirely |
+| `edit_format` | `"diff"` | how edits are expressed: `diff` (`apply_patch`) or `search_replace` (`edit_file`) |
 | `allowed_commands` | `[]` | argv prefixes `run_command` may execute; empty withdraws the tool |
 | `command_timeout_seconds` | `120` | wall clock one `run_command` gets |
 | `max_command_output_bytes` | `4000` | combined output `run_command` returns |
@@ -238,7 +239,8 @@ layer won.
 
 metron only advertises tools that can actually run. A missing ripgrep withdraws `list_files`
 and `search_text`; a BSD `ctags` withdraws `find_symbol`; running outside a git repository
-withdraws `apply_patch`; an empty `allowed_commands` withdraws `run_command`.
+withdraws `apply_patch`; an empty `allowed_commands` withdraws `run_command`. The two edit
+tools are alternatives, so `edit_format` selects one and withdraws the other.
 `disabled_tools` withdraws whatever you name, and an unknown name there is a startup error
 rather than a silent no-op.
 
@@ -261,8 +263,10 @@ message telling it not to retry.
 
 ## The tools
 
-Six tools, all methods on the `tools.Env` that holds the project root, the budgets and the
-command allowlist. This is the complete surface the model has for touching your code.
+Seven tools, all methods on the `tools.Env` that holds the project root, the budgets, the
+command allowlist and the edit format. Five are always on offer; the two edit tools are
+alternatives and `edit_format` picks one. This is the complete surface the model has for
+touching your code.
 
 ### `list_files(pattern)`
 
@@ -308,6 +312,32 @@ Applies a unified diff via `git apply --check -` followed by `git apply -`, both
 stdin. Patch failures are returned as *text*, not Go errors, so the model sees git's own
 complaint and can correct the diff itself. Only a missing `git` binary surfaces as a real
 error, since that is an environment fault rather than a bad patch.
+
+### `edit_file(path, search, replace)`
+
+The alternative to `apply_patch`, selected with `"edit_format": "search_replace"`.
+
+Unified diffs ask a model for the two things it is worst at: exact line numbers and correct
+hunk headers. A small model reads a slice, counts wrong, produces a diff `git apply` rejects,
+and then spends the rest of the turn budget adjusting numbers. `edit_file` asks it instead to
+quote the lines it already read.
+
+```
+edit_file(path="internal/tools/slice.go",
+          search="\tif end-start > maxLines {",
+          replace="\tif end-start >= maxLines {")
+```
+
+The quote is located by matching, so it must occur **exactly once** — two matches is an error
+telling the model to quote more context, never a guess. Matching runs a ladder from strict to
+forgiving, stopping at the first rung that finds exactly one match: exact, then ignoring
+trailing whitespace, then ignoring indentation. A loose match re-indents the replacement to
+the file's own indentation, and says which rung it used.
+
+An empty `replace` deletes the matched lines; an empty `search` creates the file. **You still
+approve a unified diff** — the format exists to make the model's job easier, not yours.
+
+It also needs no `git`, so on a machine without it this is the only working edit path.
 
 ### `run_command(command)`
 

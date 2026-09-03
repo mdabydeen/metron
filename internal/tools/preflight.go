@@ -18,11 +18,24 @@ const (
 	ToolViewSlice  = "view_slice"
 	ToolApplyPatch = "apply_patch"
 	ToolRunCommand = "run_command"
+	ToolEditFile   = "edit_file"
 )
 
 // ToolNames lists every tool metron can expose, in the order the model sees
 // them: discover, locate, read, then change.
-var ToolNames = []string{ToolListFiles, ToolFindSymbol, ToolSearchText, ToolViewSlice, ToolApplyPatch, ToolRunCommand}
+var ToolNames = []string{ToolListFiles, ToolFindSymbol, ToolSearchText, ToolViewSlice,
+	ToolApplyPatch, ToolEditFile, ToolRunCommand}
+
+// Edit formats. Exactly one is offered at a time: they do the same job, and
+// advertising both would pay for two schemas on every request and invite the
+// model to pick the wrong one.
+const (
+	FormatDiff          = "diff"
+	FormatSearchReplace = "search_replace"
+)
+
+// EditFormats lists the valid edit_format settings.
+var EditFormats = []string{FormatDiff, FormatSearchReplace}
 
 // Dependency describes one external binary and the tools that stop working
 // without it. ripgrep backs two of them, which is why this is a list.
@@ -102,6 +115,14 @@ func (e Env) UnavailableTools() map[string]string {
 	// and not by Preflight, which is for things that are wrong.
 	if len(e.Allowed) == 0 {
 		out[ToolRunCommand] = "no commands are permitted (set allowed_commands in .metron.json)"
+	}
+	// The two edit tools are alternatives, so whichever is not selected is
+	// withdrawn. The reason names the one that is available, which is the only
+	// thing the model needs to know.
+	if e.EditFormat == FormatSearchReplace {
+		out[ToolApplyPatch] = "edit_format is \"search_replace\"; use edit_file instead"
+	} else {
+		out[ToolEditFile] = "edit_format is \"diff\"; use apply_patch instead"
 	}
 	return out
 }
