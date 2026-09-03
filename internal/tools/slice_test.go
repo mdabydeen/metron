@@ -202,3 +202,31 @@ func TestViewSliceRefusesRelativeEscapes(t *testing.T) {
 		t.Fatal("ViewSlice() followed ../ out of the project")
 	}
 }
+
+// TestViewSliceRejectsOverflowingBounds is the regression test for a hole that
+// defeated the program's entire premise: end-start on model-supplied numbers
+// overflowed, wrapping to a negative width that sailed past the budget check
+// and read the whole file in one call.
+func TestViewSliceRejectsOverflowingBounds(t *testing.T) {
+	dir := workdir(t)
+	var big strings.Builder
+	for i := 0; i < 5000; i++ {
+		big.WriteString("line\n")
+	}
+	writeFile(t, filepath.Join(dir, "big.go"), big.String())
+	env := NewEnv(DefaultBudgets())
+
+	for _, tc := range []struct {
+		name       string
+		start, end int
+	}{
+		{"overflowing width", -5_000_000_000_000_000_000, 5_000_000_000_000_000_000},
+		{"negative start", -10, 5},
+		{"zero start", 0, 5},
+	} {
+		got, err := env.ViewSlice("big.go", tc.start, tc.end)
+		if err == nil {
+			t.Errorf("%s: ViewSlice() returned %d bytes, want the bounds refused", tc.name, len(got))
+		}
+	}
+}

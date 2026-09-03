@@ -147,7 +147,39 @@ func (e Env) resolve(path string) (string, error) {
 	if !within(e.Root, real) {
 		return "", e.errOutsideRoot(path)
 	}
+	if seg := forbiddenSegment(e.Root, real); seg != "" {
+		return "", fmt.Errorf("path %q is inside %s, which metron will not read or write. "+
+			"Edit the working tree instead", path, seg)
+	}
 	return real, nil
+}
+
+// forbidden names directories that are inside the project and still off limits.
+// Being under the root is not the same as being safe to write: .git holds the
+// configuration git itself executes, so a single edit to .git/config setting
+// core.pager or core.sshCommand runs a command the next time the operator types
+// `git log` -- and it shows up in no diff and no `git status`.
+//
+// `git apply` refuses .git paths on its own, so apply_patch was already covered;
+// edit_file writes files directly and would not have been.
+var forbidden = []string{".git", ".metron"}
+
+// forbiddenSegment reports which off-limits directory a path sits under, or "".
+// The comparison is case-insensitive because macOS's default filesystem is:
+// ".GIT/config" and ".git/config" are the same file there.
+func forbiddenSegment(root, path string) string {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return ""
+	}
+	for _, seg := range strings.Split(filepath.ToSlash(rel), "/") {
+		for _, bad := range forbidden {
+			if strings.EqualFold(seg, bad) {
+				return bad
+			}
+		}
+	}
+	return ""
 }
 
 // evalExisting resolves symlinks in the deepest part of p that exists and

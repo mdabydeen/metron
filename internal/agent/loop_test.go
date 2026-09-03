@@ -1143,3 +1143,126 @@ func TestSystemPromptNamesTheSelectedEditToolOnly(t *testing.T) {
 		t.Fatalf("system prompt omits edit_file:\n%s", a.messages[0].Content)
 	}
 }
+
+func TestMessagesReturnsACopy(t *testing.T) {
+	equipped(t)
+	a := New(&fakeChatter{}, DefaultOptions())
+	if _, err := a.Step(context.Background(), "hi"); err != nil {
+		t.Fatal(err)
+	}
+
+	got := a.Messages()
+	got[0].Content = "clobbered"
+
+	// A caller serialising this to disk must not be able to corrupt the live
+	// conversation, and compaction rewrites messages in place under it.
+	if a.messages[0].Content == "clobbered" {
+		t.Fatal("Messages() shares storage with the live history")
+	}
+}
+
+func TestRestoreReplacesHistoryAndRegeneratesThePrompt(t *testing.T) {
+	isolate(t) // only view_slice is usable here
+	a := New(&fakeChatter{}, DefaultOptions())
+	fresh := a.messages[0].Content
+
+	a.Restore([]ollama.Message{
+		{Role: "system", Content: "a system prompt from a better-equipped machine mentioning search_text"},
+		{Role: "user", Content: "earlier question"},
+		{Role: "assistant", Content: "earlier answer"},
+	})
+
+	if len(a.messages) != 3 {
+		t.Fatalf("history = %+v, want the system prompt plus two restored messages", a.messages)
+	}
+	// The saved prompt described the tools available on the machine that
+	// recorded it. Restoring it would tell this agent to call tools it has not
+	// been given.
+	if a.messages[0].Content != fresh {
+		t.Fatalf("system prompt = %q, want it regenerated for this machine", a.messages[0].Content)
+	}
+	if a.messages[1].Content != "earlier question" {
+		t.Fatalf("history = %+v, want the saved turns kept", a.messages)
+	}
+}
+
+func TestRestoreTrimsToTheHistoryBudget(t *testing.T) {
+	isolate(t)
+	opts := DefaultOptions()
+	opts.MaxHistoryMessages = 4
+	a := New(&fakeChatter{}, opts)
+
+	var saved []ollama.Message
+	for i := 0; i < 20; i++ {
+		saved = append(saved, ollama.Message{Role: "user", Content: strconv.Itoa(i)})
+	}
+	a.Restore(saved)
+
+	// A transcript from a session with a larger budget must not blow this one's.
+	if len(a.messages) > 5 {
+		t.Fatalf("restored %d messages, want them trimmed to the budget", len(a.messages))
+	}
+}
+
+func TestLastToolsRecordsWhatRan(t *testing.T) {
+	dir := equipped(t)
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeChatter{replies: []ollama.Message{
+		toolCall("view_slice", map[string]any{"path": "a.go", "start": 1, "end": 1}),
+		{Role: "assistant", Content: "done"},
+	}}
+	a := New(fake, DefaultOptions())
+
+	if _, err := a.Step(context.Background(), "look"); err != nil {
+		t.Fatal(err)
+	}
+
+	got := a.LastTools()
+	if len(got) != 1 || got[0].Name != "view_slice" {
+		t.Fatalf("LastTools() = %+v, want the dispatched call", got)
+	}
+	if got[0].Ms < 0 {
+		t.Fatalf("LastTools() = %+v, want a sane duration", got)
+	}
+}
+
+func TestLastToolsResetsEachStep(t *testing.T) {
+	dir := equipped(t)
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeChatter{replies: []ollama.Message{
+		toolCall("view_slice", map[string]any{"path": "a.go", "start": 1, "end": 1}),
+		{Role: "assistant", Content: "done"},
+		{Role: "assistant", Content: "no tools this time"},
+	}}
+	a := New(fake, DefaultOptions())
+
+	if _, err := a.Step(context.Background(), "look"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Step(context.Background(), "just chat"); err != nil {
+		t.Fatal(err)
+	}
+
+	// LastUsage and LastTools describe the most recent turn, not the session.
+	if got := a.LastTools(); len(got) != 0 {
+		t.Fatalf("LastTools() = %+v, want it cleared for a turn that ran none", got)
+	}
+}
+
+func TestToIntRejectsEnormousNumbers(t *testing.T) {
+	// JSON numbers arrive as float64. Converting a huge one straight to int
+	// produces a value that then overflows in ordinary arithmetic downstream --
+	// which is how a slice request once read a whole file.
+	for _, v := range []any{1e19, -1e19} {
+		if got := toInt(v); got != 0 {
+			t.Errorf("toInt(%v) = %d, want it refused", v, got)
+		}
+	}
+	if got := toInt(float64(42)); got != 42 {
+		t.Fatalf("toInt(42) = %d, want ordinary numbers unaffected", got)
+	}
+}

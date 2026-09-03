@@ -26,6 +26,11 @@ it means the threat model is unusual.
 - `edit_file` writes to files in your working directory directly, when
   `edit_format` is `search_replace`. It goes through the same path confinement
   and the same approval prompt, and shows you a unified diff.
+- `save_sessions` (off by default) writes the conversation to
+  `.metron/sessions/`, which includes every tool result the model saw -- that
+  is, the contents of every file it read. Transcripts are written 0600 and the
+  directory ignores itself in git, but they persist indefinitely and are not
+  encrypted. Turn it on knowing that.
 - Every patch is shown to you as a diff and requires an explicit `y` before it is applied.
   End-of-input answers *no* — an operator who has walked away has not consented.
 - `auto_approve_patches: true` in config, and the `--yes` flag, **disable that prompt
@@ -52,6 +57,21 @@ out of the tree, and treats a leading `/` as relative to the tree rather than to
 the filesystem. metron checks anyway, so the boundary is stated in metron's own
 terms and survives a future flag or backend that loosens git's.
 
+metron's own patch check reads the paths out of `---`/`+++`, `rename from`/`to`
+and `copy from`/`to` headers, and unquotes C-escaped paths first, so an escape
+cannot hide inside an octal one. It is still a parser looking at a format git
+defines: **treat `git apply` as the real boundary for patches and metron's check
+as a second opinion**, not the other way round.
+
+Two directories inside the project are refused outright, to every tool:
+`.git` and `.metron`. Being inside the root is not the same as being safe to
+write. `.git/config` holds settings git itself executes -- `core.pager`,
+`core.sshCommand`, `[alias]` -- so a single edit there runs a command the next
+time you type `git log`, and it appears in no diff and in no `git status`.
+`git apply` refuses `.git` paths on its own, so `apply_patch` was always
+covered; `edit_file` writes files directly and now refuses them too. The check
+is case-insensitive, because macOS's default filesystem is.
+
 **Running commands.** `run_command` is the only tool that can cause an effect
 metron cannot describe in advance, so it is bounded four ways:
 
@@ -67,14 +87,34 @@ metron cannot describe in advance, so it is bounded four ways:
 - **You are asked before it runs**, with the same prompt apply_patch uses, and
   the same fail-closed behaviour on end-of-input.
 - **It is bounded in time and output.** The command runs in its own process
-  group and the whole group is killed at `command_timeout_seconds`, so a
-  `go test` that spawns a test binary does not outlive its deadline. Output is
-  clipped to `max_command_output_bytes`.
+  group, and that group is killed at `command_timeout_seconds` -- so a
+  `go test` that spawns a test binary does not outlive its deadline. A process
+  that deliberately *leaves* the group (`setsid`) is not reached by the signal;
+  what bounds metron in that case is `WaitDelay`, which forces the output pipes
+  shut so the call returns rather than blocking on a survivor holding them open.
+  The result says "its process group was killed" rather than claiming the
+  command is gone, because that is what actually happened. Output is clipped to
+  `max_command_output_bytes`.
 
-Choose allowlist entries with the same care you would give a sudoers file. A
-broad entry is a broad grant: `"go"` permits `go run ./anything`, and `"make"`
-permits whatever the project's Makefile does. Prefer the narrowest prefix that
-does the job.
+Choose allowlist entries with the same care you would give a sudoers file, and
+be clear-eyed about what narrowing buys you. For any compiler, test runner or
+task runner, **every** prefix is arbitrary code execution: metron also writes
+the tree, so `"go test"` runs whatever `_test.go` the model just created, and
+`"make"` runs whatever target it just added. `"go test"` is not meaningfully
+safer than `"go"`.
+
+What actually bounds this is the approval prompt and starting from a clean git
+tree, not the narrowness of the prefix. Narrow entries still help -- they make
+an unexpected command visible rather than routine -- but do not mistake them for
+a sandbox.
+
+**A project cannot grant itself any of this.** `.metron.json` travels with a
+repository, and it is the highest-priority config file, so a cloned repository
+could otherwise set `auto_approve_patches` and `allowed_commands` and turn
+`git clone && metron` into arbitrary code execution before the first turn. Those
+settings -- and `save_sessions` -- are honoured only from your user-level config
+or from a file you name with `METRON_CONFIG`. A project file that sets them is
+reported on stderr and ignored.
 
 **Remaining limitations** -- these are real:
 
@@ -90,6 +130,13 @@ does the job.
   directory to the project, but the command itself runs with your full user
   privileges and can reach anything you can. Path confinement bounds metron's
   own tools; it cannot bound a program you have permitted to run.
+- **What you approve is what applies, but read it carefully.** The diff shown at
+  the prompt is written by the model. Control characters in it are escaped
+  rather than executed, so it cannot clear your screen and redraw a different
+  patch, and an over-long preview is truncated with a count rather than
+  scrolling the real hunk out of view. It can still be *misleading* in ways no
+  escaping fixes: a plausible-looking change to an unexpected file, a mode
+  change that renders as an almost-empty hunk.
 - **Prompt injection is not mitigated.** Content in the files metron reads is
   data, but a sufficiently persuasive comment in a source file may influence what
   the model proposes. The approval prompt is the mitigation. Read the diffs.
@@ -102,7 +149,9 @@ approval prompt, and does not claim to.
 
 - No telemetry, no analytics, no crash reporting, no network calls other than to the
   endpoint you configure.
-- No credentials of any kind are read or stored. There is no login and no account.
+- metron has no account, no login, and stores no credentials of its own. It does
+  not follow that nothing sensitive is stored: with `save_sessions` on, whatever
+  the model read is written to `.metron/sessions/`.
 - No shell. External binaries (`rg`, `ctags`, `git`) are invoked with an explicit argument
   vector, never through `sh -c`, so a model-supplied string cannot become a shell command.
   Model-supplied values are additionally kept out of the flag namespace -- passed after `--`

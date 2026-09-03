@@ -248,3 +248,12 @@ func TestResolveWalksUpToAnExistingAncestor(t *testing.T) {
 		t.Fatalf("resolve() = %q, want the path under the configured root", got)
 	}
 }
+
+func TestForbiddenSegmentHandlesAnUnrelatedPath(t *testing.T) {
+	// filepath.Rel fails when the paths share no root; that must not be read
+	// as "no forbidden segment found" on a path that was already refused by
+	// the within check anyway.
+	if got := forbiddenSegment("/a/b", "relative/path"); got != "" {
+		t.Fatalf("forbiddenSegment() = %q, want no segment for an unrelatable path", got)
+	}
+}

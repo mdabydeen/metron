@@ -196,10 +196,18 @@ cp metron.example.json .metron.json
 | `search_max_per_file` | `2` | `search_text` results per file |
 | `list_max_entries` | `60` | paths `list_files` will return |
 | `disabled_tools` | `[]` | tool names to withhold from the model entirely |
+| `save_sessions` | `false` | write each conversation to `.metron/sessions` |
 | `edit_format` | `"diff"` | how edits are expressed: `diff` (`apply_patch`) or `search_replace` (`edit_file`) |
 | `allowed_commands` | `[]` | argv prefixes `run_command` may execute; empty withdraws the tool |
 | `command_timeout_seconds` | `120` | wall clock one `run_command` gets |
 | `max_command_output_bytes` | `4000` | combined output `run_command` returns |
+
+**Some settings are not accepted from a project file.** `.metron.json` travels with a
+repository, and it is the highest-priority config file — so a repository you cloned could
+otherwise switch off the approval prompt and switch on `run_command` before the first turn.
+`auto_approve_patches`, `allowed_commands` and `save_sessions` are honoured only from your
+user-level config or a file you name with `METRON_CONFIG`. A project file that sets them is
+reported on stderr and ignored.
 
 A file that exists but cannot be read or parsed is a startup error, not a silent fallback —
 including unknown keys, so a typo like `"modle"` is reported instead of ignored. Values are
@@ -338,6 +346,37 @@ An empty `replace` deletes the matched lines; an empty `search` creates the file
 approve a unified diff** — the format exists to make the model's job easier, not yours.
 
 It also needs no `git`, so on a machine without it this is the only working edit path.
+
+### Sessions
+
+With `save_sessions` on, each conversation is written to `.metron/sessions/<id>.jsonl` as it
+goes, so it survives exiting. `/save` writes one now, `/sessions` lists them, and
+`--resume <id>` or `--resume-last` continues one. The directory contains a `.gitignore` of
+`*`, so it never shows up as untracked in your project.
+
+It is **off by default**: a transcript contains every tool result the model saw, which is the
+contents of every file it read. Transcripts are written `0600`, but they persist. Resuming a
+session whose tree has moved since it was saved prints a warning, because the conversation is
+full of line numbers and quoted code that may no longer be true.
+
+### One-shot JSON
+
+`metron -p "..." --json` prints exactly one object on stdout and nothing else:
+
+```json
+{
+  "answer": "Greet now returns hola.",
+  "ok": true,
+  "turns": 3,
+  "tools": [{"name": "view_slice", "ms": 2}, {"name": "edit_file", "ms": 1}],
+  "usage": {"prompt": 7341, "generated": 511},
+  "files_changed": ["greet.go"]
+}
+```
+
+`files_changed` is derived from `git status`, so it is true whichever edit format was used,
+and true for a file a permitted command wrote as a side effect. A failed run still emits a
+valid object with `"ok": false` and an `error`; the exit code carries the verdict.
 
 ### `run_command(command)`
 

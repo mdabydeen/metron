@@ -22,8 +22,11 @@ func (e Env) EnsureTags() error {
 	if _, err := os.Stat(e.tagsFile()); err == nil {
 		return nil
 	}
-	cmd := exec.Command("ctags", "-R", "--fields=+nK", "--exclude=.git", "--exclude=vendor",
-		"-f", e.tagsFile(), ".")
+	// --links=no matters: Universal Ctags follows symlinks by default, so a
+	// vendor -> /somewhere/private symlink would put paths from outside the
+	// project into the index, and FindSymbol reports index paths verbatim.
+	cmd := exec.Command("ctags", "-R", "--links=no", "--fields=+nK",
+		"--exclude=.git", "--exclude=vendor", "-f", e.tagsFile(), ".")
 	cmd.Dir = e.Root
 	out, err := cmd.CombinedOutput()
 	if err == nil {
@@ -58,6 +61,12 @@ func (e Env) FindSymbol(symbol string) (string, error) {
 		}
 		parts := strings.Split(line, "\t")
 		if len(parts) >= 3 && parts[0] == symbol {
+			// An index built before --links=no, or one edited by hand, can name
+			// a path outside the project. Report only what the other tools
+			// would actually let the model read.
+			if _, err := e.resolve(parts[1]); err != nil {
+				continue
+			}
 			lineNo, kind := "unknown", "sym"
 			for _, p := range parts[2:] {
 				if strings.HasPrefix(p, "line:") {

@@ -2,6 +2,7 @@ package tools
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -174,5 +175,28 @@ func TestFindSymbolReturnsErrorWhenTagsFileUnreadable(t *testing.T) {
 
 	if _, err := defaultEnv(t).FindSymbol("Agent"); err == nil {
 		t.Fatal("FindSymbol() = nil error, want a read failure")
+	}
+}
+
+func TestFindSymbolSkipsPathsOutsideTheProject(t *testing.T) {
+	dir := workdir(t)
+	env := NewEnv(DefaultBudgets())
+	// An index built before --links=no, or edited by hand, can name a path
+	// outside the project. FindSymbol reports index paths verbatim, so it must
+	// not report what the other tools would refuse to open.
+	writeFile(t, filepath.Join(dir, ".tags"),
+		"Escaped\t../../outside.go\t/^x$/;\"\tkind:func\tline:1\n"+
+			"Inside\tinside.go\t/^x$/;\"\tkind:func\tline:2\n")
+	writeFile(t, filepath.Join(dir, "inside.go"), "x\n")
+
+	got, err := env.FindSymbol("Escaped")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "not found") {
+		t.Fatalf("FindSymbol() = %q, want an out-of-project path withheld", got)
+	}
+	if got, _ := env.FindSymbol("Inside"); !strings.Contains(got, "inside.go") {
+		t.Fatalf("FindSymbol() = %q, want in-project symbols still reported", got)
 	}
 }

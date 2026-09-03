@@ -31,6 +31,44 @@ is pre-1.0, the minor version is bumped for breaking changes to configuration or
   a git repository withdraws `apply_patch`. Their schemas are then not sent at all, and the
   system prompt stops naming them — on a stock Mac that is ~164 fewer prompt tokens on every
   request. A call to an unadvertised tool is refused before it runs.
+- Session persistence. With `save_sessions` on, the conversation is written to
+  `.metron/sessions/<id>.jsonl` as each turn completes, and `/save`, `/sessions`,
+  `--resume <id>` and `--resume-last` manage it. The directory ignores itself in git.
+  Off by default, and written 0600, because a transcript holds every file the model read.
+  Resuming against a tree that has moved since the session was saved warns first.
+- `metron -p ... --json` prints one object describing the run: the answer, the tools it ran
+  and how long each took, the tokens it cost, and the files it changed. `files_changed` comes
+  from `git status`, so it is true whichever edit format was used. A failed run still emits a
+  valid object.
+
+### Security
+
+- **A project's `.metron.json` can no longer grant itself permissions.** It is the
+  highest-priority config file and ships inside whatever repository metron is pointed at, so
+  a cloned repository could set `auto_approve_patches` and `allowed_commands` and turn
+  `git clone && metron` into arbitrary code execution before the first turn. Those settings,
+  and `save_sessions`, are now honoured only from the user-level config or a file named by
+  `METRON_CONFIG`; a project file that sets them is reported and ignored.
+- **`edit_file` can no longer write inside `.git`.** Being under the project root is not the
+  same as being safe to write: `.git/config` holds settings git executes, so an edit setting
+  `core.pager` runs a command at the next `git log`, invisibly to both `git status` and any
+  diff. `git apply` refuses these paths itself, so `apply_patch` was always covered and the
+  new edit format was not. `.metron` is refused too, and the check is case-insensitive.
+- **`view_slice` bounds no longer overflow.** `end - start` on model-supplied numbers wrapped
+  negative, sailed past the budget check, and read a whole file in one call -- defeating the
+  guarantee the program exists to make.
+- **The approval prompt cannot be spoofed.** The preview is written by the model; control
+  characters in it are now escaped rather than executed, so a diff cannot clear the screen
+  and redraw a different, innocuous-looking patch. Over-long previews are truncated with a
+  count instead of scrolling the real hunk out of the terminal.
+- `run_command` no longer blocks past its deadline when a child escapes the process group,
+  and no longer claims to have killed a command that is still running.
+- `apply_patch` reads rename and copy headers, and unquotes C-escaped paths, so its own path
+  check sees diffs that previously reached git unexamined.
+- `ctags` no longer follows symlinks out of the project, and `find_symbol` no longer reports
+  index paths the other tools would refuse to open.
+- `--resume` validates the session id rather than joining it straight onto a path.
+
 - `edit_file`, an anchored search/replace edit format, selected with
   `"edit_format": "search_replace"`. Unified diffs need exact line numbers and hunk headers,
   which is what small models most reliably get wrong; this asks them to quote lines they have

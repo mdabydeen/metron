@@ -16,6 +16,7 @@ import (
 	"github.com/mdabydeen/metron/internal/agent"
 	"github.com/mdabydeen/metron/internal/config"
 	"github.com/mdabydeen/metron/internal/ollama"
+	"github.com/mdabydeen/metron/internal/session"
 	"github.com/mdabydeen/metron/internal/tools"
 )
 
@@ -23,6 +24,8 @@ const helpText = `Commands:
   /help    show this message
   /config  show the active settings and where they came from
   /reset   clear the conversation history (keeps the system prompt)
+  /save    write the conversation to disk now
+  /sessions list saved sessions and how to resume one
   /history show how much conversation is being carried
   /tags    rebuild the ctags symbol index for the current directory
   /exit    quit (also: exit, quit, Ctrl-D)
@@ -39,7 +42,10 @@ type stepper interface {
 	Reset()
 	HistorySize() (messages, bytes int)
 	LastUsage() (ollama.Usage, int)
+	LastTools() []agent.ToolRun
 	AdvertisedTools() (names []string, schemaBytes int)
+	Messages() []ollama.Message
+	Restore(messages []ollama.Message)
 }
 
 // exit is indirected so tests can exercise main without killing the process.
@@ -58,6 +64,9 @@ type flags struct {
 	prompt      string
 	yes         bool
 	showVersion bool
+	asJSON      bool
+	resume      string
+	resumeLast  bool
 }
 
 // parseFlags reads the command line. It reports ok=false when the process
@@ -69,6 +78,9 @@ func parseFlags(args []string, errOut io.Writer) (f flags, code int, ok bool) {
 	fs.StringVar(&f.prompt, "prompt", "", "run one request non-interactively and exit")
 	fs.BoolVar(&f.yes, "yes", false, "apply patches without asking (required by -p to edit files)")
 	fs.BoolVar(&f.showVersion, "version", false, "print the version and exit")
+	fs.BoolVar(&f.asJSON, "json", false, "with -p, print one JSON object describing the run")
+	fs.StringVar(&f.resume, "resume", "", "resume a saved session by id")
+	fs.BoolVar(&f.resumeLast, "resume-last", false, "resume the most recent saved session")
 	fs.Usage = func() {
 		fmt.Fprintf(errOut, "usage: metron [flags]\n\nRun from the root of the repository you want to work on.\n\n")
 		fs.PrintDefaults()
@@ -94,7 +106,12 @@ func runMain(args []string, in io.Reader, out, errOut io.Writer) int {
 		return 0
 	}
 
-	cfg, path, err := config.Load()
+	cfg, path, configWarnings, err := config.Load()
+	for _, w := range configWarnings {
+		// Loud, and on stderr so it survives -p piping: this is the operator
+		// finding out that a repository tried to grant itself permissions.
+		fmt.Fprintf(errOut, "\033[1;33mwarning: %s\033[0m\n", w)
+	}
 	if err != nil {
 		fmt.Fprintf(errOut, "\033[31mconfig error: %v\033[0m\n", err)
 		return 1
@@ -144,6 +161,13 @@ func runMain(args []string, in io.Reader, out, errOut io.Writer) int {
 		DisabledTools:      cfg.DisabledTools,
 		Progress:           out,
 	}
+	// One-shot mode owns stdout: it prints an answer, or a single JSON object,
+	// and nothing else. Progress notices therefore go to stderr whatever the
+	// approval setting is -- with --yes they used to land on stdout and corrupt
+	// exactly the output a script was reading.
+	if f.prompt != "" {
+		opts.Progress = errOut
+	}
 	autoApprove := cfg.AutoApprovePatches || f.yes
 	switch {
 	case autoApprove:
@@ -152,33 +176,47 @@ func runMain(args []string, in io.Reader, out, errOut io.Writer) int {
 		// Nobody is at the keyboard to answer, so fail closed rather than
 		// block forever or edit the tree unattended.
 		opts.Approve = func(string, string) bool { return false }
-		opts.Progress = errOut
 	default:
 		opts.Approve = func(kind, preview string) bool { return approve(out, scanner, kind, preview) }
 	}
 	bot := agent.New(client, opts)
 
-	if f.prompt != "" {
-		return oneShot(context.Background(), out, errOut, env, bot, f.prompt)
+	store := session.Store{Root: env.Root}
+	sess := newRecorder(store, cfg, errOut)
+	if id, err := resumeTarget(store, f); err != nil {
+		fmt.Fprintf(errOut, "\033[31m%v\033[0m\n", err)
+		return 1
+	} else if id != "" {
+		if err := sess.resume(id, bot, out); err != nil {
+			fmt.Fprintf(errOut, "\033[31m%v\033[0m\n", err)
+			return 1
+		}
 	}
 
-	run(context.Background(), scanner, out, cfg, path, env, bot, streamed)
+	if f.prompt != "" {
+		return oneShot(context.Background(), out, errOut, env, bot, sess, f)
+	}
+
+	run(context.Background(), scanner, out, cfg, path, env, bot, sess, streamed)
 	return 0
 }
 
-// oneShot runs a single request and prints only the answer on stdout, so
-// `metron -p ... 2>/dev/null` is pipeable. Progress and warnings go to stderr.
-func oneShot(ctx context.Context, out, errOut io.Writer, env tools.Env, bot stepper, prompt string) int {
-	for _, w := range env.Preflight() {
-		fmt.Fprintf(errOut, "warning: %s\n", w)
+// resumeTarget resolves which session, if any, the flags asked to continue.
+func resumeTarget(store session.Store, f flags) (string, error) {
+	if f.resume != "" {
+		return f.resume, nil
 	}
-	resp, err := step(ctx, bot, prompt)
+	if !f.resumeLast {
+		return "", nil
+	}
+	id, err := store.Latest()
 	if err != nil {
-		fmt.Fprintf(errOut, "error: %v\n", err)
-		return 1
+		return "", fmt.Errorf("list sessions: %w", err)
 	}
-	fmt.Fprintln(out, resp)
-	return 0
+	if id == "" {
+		return "", errors.New("no saved sessions to resume")
+	}
+	return id, nil
 }
 
 // maxInputLine lets a pasted diff or a long request through; the scanner
@@ -193,6 +231,49 @@ var approvalWording = map[string]struct{ heading, question, refusal string }{
 	"command": {"Proposed command", "Run this command?", "Command not run."},
 }
 
+// previewMaxLines caps what the approval prompt renders. A large diff would
+// otherwise scroll the interesting hunk out of the terminal, leaving only the
+// tail visible above the [y/N] -- which is the same as not being shown it.
+const previewMaxLines = 200
+
+// renderPreview makes model-supplied text safe to print at the approval prompt,
+// and reports how many lines it withheld.
+//
+// The preview is written by the model, and the prompt is the mitigation this
+// program relies on for everything it cannot check itself. Printed raw, a diff
+// can carry escape sequences that clear the screen and redraw a different,
+// innocuous-looking patch, or hide lines with \r and colour tricks -- so the
+// operator approves what they were shown rather than what applies. Control
+// characters are therefore escaped rather than executed.
+func renderPreview(preview string) (body string, hidden int) {
+	lines := strings.Split(strings.TrimRight(preview, "\n"), "\n")
+	if len(lines) > previewMaxLines {
+		hidden = len(lines) - previewMaxLines
+		lines = lines[:previewMaxLines]
+	}
+	for i, line := range lines {
+		lines[i] = escapeControl(line)
+	}
+	return strings.Join(lines, "\n"), hidden
+}
+
+// escapeControl renders C0 and C1 control characters visibly instead of letting
+// the terminal act on them. Tabs survive, since source code is full of them.
+func escapeControl(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r == '\t':
+			b.WriteRune(r)
+		case r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f):
+			fmt.Fprintf(&b, "\\x%02x", r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
 // approve shows what the model wants to do and waits for a yes. It reads from
 // the REPL's own scanner, so a queued line is consumed here rather than being
 // mistaken for the next request. EOF answers no: an operator who is gone has
@@ -202,7 +283,11 @@ func approve(out io.Writer, scanner *bufio.Scanner, kind, preview string) bool {
 	if !ok {
 		w = struct{ heading, question, refusal string }{"Proposed action", "Allow this?", "Not allowed."}
 	}
-	fmt.Fprintf(out, "\n\033[1m%s:\033[0m\n%s\n", w.heading, strings.TrimRight(preview, "\n"))
+	body, hidden := renderPreview(preview)
+	fmt.Fprintf(out, "\n\033[1m%s:\033[0m\n%s\n", w.heading, body)
+	if hidden > 0 {
+		fmt.Fprintf(out, "\033[2m[%d more lines not shown]\033[0m\n", hidden)
+	}
 	fmt.Fprintf(out, "\033[1;33m%s [y/N] \033[0m", w.question)
 	if !scanner.Scan() {
 		fmt.Fprintf(out, "\nNo input; %s\n", strings.ToLower(w.refusal))
@@ -221,7 +306,7 @@ func approve(out io.Writer, scanner *bufio.Scanner, kind, preview string) bool {
 // streamed tells run that replies already reached out as they arrived, so it
 // must not print them a second time. It is a parameter rather than a read of
 // cfg.Stream because the caller is what actually wires the client's sink.
-func run(ctx context.Context, scanner *bufio.Scanner, out io.Writer, cfg config.Config, cfgPath string, env tools.Env, bot stepper, streamed bool) {
+func run(ctx context.Context, scanner *bufio.Scanner, out io.Writer, cfg config.Config, cfgPath string, env tools.Env, bot stepper, sess *recorder, streamed bool) {
 	fmt.Fprintf(out, "\033[1;36m=== metron (model: %s) ===\033[0m\n", cfg.Model)
 	fmt.Fprintln(out, "Context-disciplined terminal coder. /help for commands, /exit to quit.")
 	if cfgPath != "" {
@@ -240,7 +325,7 @@ func run(ctx context.Context, scanner *bufio.Scanner, out io.Writer, cfg config.
 		if input == "" {
 			continue
 		}
-		if done := command(out, input, cfg, cfgPath, env, bot); done {
+		if done := command(out, input, cfg, cfgPath, env, bot, sess); done {
 			return
 		}
 		if strings.HasPrefix(input, "/") {
@@ -272,6 +357,7 @@ func run(ctx context.Context, scanner *bufio.Scanner, out io.Writer, cfg config.
 			fmt.Fprintf(out, "\n\033[1m%s\033[0m\n", resp)
 		}
 		reportUsage(out, bot, cfg.NumCtx)
+		sess.save(bot)
 	}
 }
 
@@ -323,7 +409,7 @@ func step(ctx context.Context, bot stepper, input string) (string, error) {
 
 // command handles the REPL's own directives. It reports whether the REPL
 // should stop; non-command input is left for the model.
-func command(out io.Writer, input string, cfg config.Config, cfgPath string, env tools.Env, bot stepper) (quit bool) {
+func command(out io.Writer, input string, cfg config.Config, cfgPath string, env tools.Env, bot stepper, sess *recorder) (quit bool) {
 	switch input {
 	case "exit", "quit", "/exit", "/quit":
 		return true
@@ -334,6 +420,15 @@ func command(out io.Writer, input string, cfg config.Config, cfgPath string, env
 	case "/reset":
 		bot.Reset()
 		fmt.Fprintln(out, "Conversation history cleared.")
+	case "/save":
+		sess.save(bot)
+		if sess.enabled {
+			fmt.Fprintf(out, "Session saved to %s\n", sess.path())
+			break
+		}
+		fmt.Fprintln(out, "Session saving is off (set save_sessions to true).")
+	case "/sessions":
+		listSessions(out, sess)
 	case "/history":
 		msgs, bytes := bot.HistorySize()
 		fmt.Fprintf(out, "history: %d messages, ~%d bytes (budget: %d messages; /reset clears it)\n",

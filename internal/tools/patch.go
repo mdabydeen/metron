@@ -3,6 +3,7 @@ package tools
 import (
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
 )
 
@@ -50,25 +51,40 @@ func (e Env) ApplyPatch(diff string) (string, error) {
 	return "Patch successfully applied to working tree.", nil
 }
 
-// patchTargets extracts the files a unified diff claims to touch, from its
-// ---/+++ headers. Anything it does not recognise is left for git to reject,
-// which it does with a better message than this could produce.
+// patchHeaders are the ways a unified diff names a file it will touch. Reading
+// only ---/+++ was not enough: a pure rename carries neither, so a rename diff
+// slipped past this check entirely and was bounded by git alone.
+var patchHeaders = []string{"--- ", "+++ ", "rename from ", "rename to ", "copy from ", "copy to "}
+
+// patchTargets extracts the files a unified diff claims to touch. Anything it
+// does not recognise is left for git to reject, which it does with a better
+// message than this could produce.
 func patchTargets(diff string) []string {
 	var targets []string
 	for _, line := range strings.Split(diff, "\n") {
 		var prefix string
-		switch {
-		case strings.HasPrefix(line, "--- "):
-			prefix = "--- "
-		case strings.HasPrefix(line, "+++ "):
-			prefix = "+++ "
-		default:
+		for _, h := range patchHeaders {
+			if strings.HasPrefix(line, h) {
+				prefix = h
+				break
+			}
+		}
+		if prefix == "" {
 			continue
 		}
+		field := strings.TrimPrefix(line, prefix)
 		// A header may carry a timestamp after a tab; the path stops there.
-		path := strings.TrimSpace(strings.SplitN(strings.TrimPrefix(line, prefix), "\t", 2)[0])
+		path := strings.TrimSpace(strings.SplitN(field, "\t", 2)[0])
 		if path == "" || path == "/dev/null" {
 			continue
+		}
+		// git C-quotes a path containing unusual bytes, so "b/\\056\\056/x" is
+		// really "b/../x". Unquoting before the check is what stops an escape
+		// from being hidden inside an octal one.
+		if strings.HasPrefix(path, `"`) {
+			if unquoted, err := strconv.Unquote(path); err == nil {
+				path = unquoted
+			}
 		}
 		// Strip git's a/ and b/ working-tree prefixes. --no-prefix diffs have
 		// neither, which is why this is a trim rather than a requirement.

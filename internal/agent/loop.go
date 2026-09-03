@@ -7,6 +7,7 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/mdabydeen/metron/internal/ollama"
 	"github.com/mdabydeen/metron/internal/tools"
@@ -65,6 +66,7 @@ type Agent struct {
 	messages  []ollama.Message
 	lastUsage ollama.Usage
 	lastCalls int
+	lastTools []ToolRun
 
 	// advertised is the tool set sent with every request, fixed when the agent
 	// is built. Schemas are paid for on every model call, so a tool that cannot
@@ -305,7 +307,7 @@ var toolDefs = map[string]ollama.Tool{
 
 func (a *Agent) Step(ctx context.Context, userPrompt string) (string, error) {
 	a.messages = append(a.messages, ollama.Message{Role: "user", Content: userPrompt})
-	a.lastUsage, a.lastCalls = ollama.Usage{}, 0
+	a.lastUsage, a.lastCalls, a.lastTools = ollama.Usage{}, 0, nil
 
 	// Execution loop
 	for turns := 0; turns < a.opts.MaxTurns; turns++ {
@@ -324,7 +326,12 @@ func (a *Agent) Step(ctx context.Context, userPrompt string) (string, error) {
 
 		a.lastCalls += len(resp.ToolCalls)
 		for _, call := range resp.ToolCalls {
+			started := time.Now()
 			out := a.dispatch(ctx, call)
+			a.lastTools = append(a.lastTools, ToolRun{
+				Name: call.Function.Name,
+				Ms:   time.Since(started).Milliseconds(),
+			})
 			a.messages = append(a.messages, ollama.Message{
 				Role:     "tool",
 				ToolName: call.Function.Name,
@@ -482,11 +489,47 @@ func (a *Agent) trimHistory() {
 	a.messages = append(a.messages[:1:1], body...)
 }
 
+// ToolRun is one dispatched tool call and how long it took. The duration is
+// wall clock, which for a local model is dwarfed by generation -- it is here so
+// a benchmark can tell a slow tool from a slow model rather than guess.
+type ToolRun struct {
+	Name string `json:"name"`
+	Ms   int64  `json:"ms"`
+}
+
+// LastTools reports the tools the most recent Step ran, in order.
+func (a *Agent) LastTools() []ToolRun { return a.lastTools }
+
 // LastUsage reports what the most recent Step cost: tokens across every model
 // call it made, and how many tools it ran. A budget nobody can see is a budget
 // nobody keeps.
 func (a *Agent) LastUsage() (ollama.Usage, int) {
 	return a.lastUsage, a.lastCalls
+}
+
+// Messages returns a copy of the conversation, for saving. It is a copy so a
+// caller writing it to disk cannot be surprised by the next turn mutating what
+// it is halfway through serialising -- compaction rewrites messages in place.
+func (a *Agent) Messages() []ollama.Message {
+	out := make([]ollama.Message, len(a.messages))
+	copy(out, a.messages)
+	return out
+}
+
+// Restore replaces the conversation with a saved one, backing /resume.
+//
+// The system prompt is regenerated rather than restored: it describes the tools
+// available *now*, and a session saved on a machine with ripgrep should not tell
+// this one to call search_text.
+func (a *Agent) Restore(messages []ollama.Message) {
+	a.Reset()
+	for _, m := range messages {
+		if m.Role == "system" {
+			continue
+		}
+		a.messages = append(a.messages, m)
+	}
+	a.trimHistory()
 }
 
 // HistorySize reports the number of retained messages and their combined
@@ -498,9 +541,17 @@ func (a *Agent) HistorySize() (messages, bytes int) {
 	return len(a.messages), bytes
 }
 
+// maxToolInt bounds a number taken from a tool call. JSON numbers arrive as
+// float64, and converting an enormous one straight to int produces a value that
+// then overflows in ordinary arithmetic downstream.
+const maxToolInt = 1 << 31
+
 func toInt(v any) int {
 	switch n := v.(type) {
 	case float64:
+		if n > maxToolInt || n < -maxToolInt {
+			return 0
+		}
 		return int(n)
 	case int:
 		return n

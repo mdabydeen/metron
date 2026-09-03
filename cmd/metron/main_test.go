@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,8 +16,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mdabydeen/metron/internal/agent"
 	"github.com/mdabydeen/metron/internal/config"
 	"github.com/mdabydeen/metron/internal/ollama"
+	"github.com/mdabydeen/metron/internal/session"
 	"github.com/mdabydeen/metron/internal/tools"
 )
 
@@ -48,6 +51,9 @@ type fakeStepper struct {
 
 	advertised  []string
 	schemaBytes int
+	tools       []agent.ToolRun
+	messages    []ollama.Message
+	restored    bool
 }
 
 func (f *fakeStepper) Step(ctx context.Context, userPrompt string) (string, error) {
@@ -65,6 +71,9 @@ func (f *fakeStepper) HistorySize() (int, int) { return f.msgs, f.bytes }
 func (f *fakeStepper) LastUsage() (ollama.Usage, int) { return f.usage, f.calls }
 
 func (f *fakeStepper) AdvertisedTools() ([]string, int) { return f.advertised, f.schemaBytes }
+func (f *fakeStepper) LastTools() []agent.ToolRun       { return f.tools }
+func (f *fakeStepper) Messages() []ollama.Message       { return f.messages }
+func (f *fakeStepper) Restore(m []ollama.Message)       { f.messages = m; f.restored = true }
 
 // gitDir makes a scratch git repository the working directory. apply_patch is
 // only advertised inside a work tree, so any test that exercises the patch path
@@ -105,7 +114,7 @@ func TestRunSendsEachLineToTheAgent(t *testing.T) {
 	bot := &fakeStepper{reply: "an answer"}
 	var out bytes.Buffer
 
-	run(context.Background(), replFor("first\n  second  \n"), &out, cfgFor("test-model"), "", testEnv(t), bot, false)
+	run(context.Background(), replFor("first\n  second  \n"), &out, cfgFor("test-model"), "", testEnv(t), bot, testRecorder(t), false)
 
 	if len(bot.prompts) != 2 || bot.prompts[0] != "first" || bot.prompts[1] != "second" {
 		t.Fatalf("prompts = %q, want the trimmed input lines", bot.prompts)
@@ -122,7 +131,7 @@ func TestRunSkipsBlankLines(t *testing.T) {
 	bot := &fakeStepper{reply: "ok"}
 	var out bytes.Buffer
 
-	run(context.Background(), replFor("\n   \n\nreal\n"), &out, cfgFor("m"), "", testEnv(t), bot, false)
+	run(context.Background(), replFor("\n   \n\nreal\n"), &out, cfgFor("m"), "", testEnv(t), bot, testRecorder(t), false)
 
 	if len(bot.prompts) != 1 || bot.prompts[0] != "real" {
 		t.Fatalf("prompts = %q, want blank lines ignored", bot.prompts)
@@ -135,7 +144,7 @@ func TestRunStopsOnExitCommands(t *testing.T) {
 			bot := &fakeStepper{reply: "ok"}
 			var out bytes.Buffer
 
-			run(context.Background(), replFor(cmd+"\nafter\n"), &out, cfgFor("m"), "", testEnv(t), bot, false)
+			run(context.Background(), replFor(cmd+"\nafter\n"), &out, cfgFor("m"), "", testEnv(t), bot, testRecorder(t), false)
 
 			if len(bot.prompts) != 0 {
 				t.Fatalf("prompts = %q, want the loop to stop at %q", bot.prompts, cmd)
@@ -148,7 +157,7 @@ func TestRunStopsAtEOF(t *testing.T) {
 	bot := &fakeStepper{reply: "ok"}
 	var out bytes.Buffer
 
-	run(context.Background(), replFor("only\n"), &out, cfgFor("m"), "", testEnv(t), bot, false)
+	run(context.Background(), replFor("only\n"), &out, cfgFor("m"), "", testEnv(t), bot, testRecorder(t), false)
 
 	if len(bot.prompts) != 1 {
 		t.Fatalf("prompts = %q, want a clean stop at EOF", bot.prompts)
@@ -159,7 +168,7 @@ func TestRunKeepsGoingAfterAnAgentError(t *testing.T) {
 	bot := &fakeStepper{err: errors.New("ollama unreachable")}
 	var out bytes.Buffer
 
-	run(context.Background(), replFor("one\ntwo\n"), &out, cfgFor("m"), "", testEnv(t), bot, false)
+	run(context.Background(), replFor("one\ntwo\n"), &out, cfgFor("m"), "", testEnv(t), bot, testRecorder(t), false)
 
 	if len(bot.prompts) != 2 {
 		t.Fatalf("prompts = %q, want the REPL to survive the error", bot.prompts)
@@ -171,7 +180,7 @@ func TestRunKeepsGoingAfterAnAgentError(t *testing.T) {
 
 func TestRunShowsConfigPathWhenOneIsUsed(t *testing.T) {
 	var out bytes.Buffer
-	run(context.Background(), replFor("exit\n"), &out, cfgFor("m"), "/etc/metron.json", testEnv(t), &fakeStepper{}, false)
+	run(context.Background(), replFor("exit\n"), &out, cfgFor("m"), "/etc/metron.json", testEnv(t), &fakeStepper{}, testRecorder(t), false)
 
 	if !strings.Contains(out.String(), "config: /etc/metron.json") {
 		t.Fatalf("output = %q, want the config path in the banner", out.String())
@@ -182,7 +191,7 @@ func TestRunWarnsAboutMissingDependencies(t *testing.T) {
 	t.Setenv("PATH", filepath.Join(t.TempDir(), "empty"))
 	var out bytes.Buffer
 
-	run(context.Background(), replFor("exit\n"), &out, cfgFor("m"), "", testEnv(t), &fakeStepper{}, false)
+	run(context.Background(), replFor("exit\n"), &out, cfgFor("m"), "", testEnv(t), &fakeStepper{}, testRecorder(t), false)
 
 	for _, want := range []string{"rg not found", "ctags not found", "git not found"} {
 		if !strings.Contains(out.String(), want) {
@@ -195,7 +204,7 @@ func TestRunDoesNotSendCommandsToTheModel(t *testing.T) {
 	bot := &fakeStepper{reply: "ok"}
 	var out bytes.Buffer
 
-	run(context.Background(), replFor("/help\n/reset\n/nope\nreal question\n"), &out, cfgFor("m"), "", testEnv(t), bot, false)
+	run(context.Background(), replFor("/help\n/reset\n/nope\nreal question\n"), &out, cfgFor("m"), "", testEnv(t), bot, testRecorder(t), false)
 
 	if len(bot.prompts) != 1 || bot.prompts[0] != "real question" {
 		t.Fatalf("prompts = %q, want only the non-command line forwarded", bot.prompts)
@@ -208,7 +217,7 @@ func TestRunDoesNotSendCommandsToTheModel(t *testing.T) {
 func TestCommandHelp(t *testing.T) {
 	var out bytes.Buffer
 
-	if quit := command(&out, "/help", config.Defaults(), "", testEnv(t), &fakeStepper{}); quit {
+	if quit := command(&out, "/help", config.Defaults(), "", testEnv(t), &fakeStepper{}, testRecorder(t)); quit {
 		t.Fatal("/help asked the REPL to quit")
 	}
 	for _, want := range []string{"/help", "/config", "/reset", "/tags", "/exit"} {
@@ -222,7 +231,7 @@ func TestCommandReset(t *testing.T) {
 	bot := &fakeStepper{}
 	var out bytes.Buffer
 
-	command(&out, "/reset", config.Defaults(), "", testEnv(t), bot)
+	command(&out, "/reset", config.Defaults(), "", testEnv(t), bot, testRecorder(t))
 
 	if bot.resets != 1 {
 		t.Fatalf("resets = %d, want 1", bot.resets)
@@ -237,7 +246,7 @@ func TestCommandConfigPrintsEffectiveSettings(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Model = "printed-model"
 
-	command(&out, "/config", cfg, "/tmp/metron.json", testEnv(t), &fakeStepper{})
+	command(&out, "/config", cfg, "/tmp/metron.json", testEnv(t), &fakeStepper{}, testRecorder(t))
 
 	if !strings.Contains(out.String(), "source: /tmp/metron.json") {
 		t.Fatalf("output = %q, want the config source", out.String())
@@ -255,7 +264,7 @@ func TestCommandConfigPrintsEffectiveSettings(t *testing.T) {
 func TestCommandConfigWithoutAFile(t *testing.T) {
 	var out bytes.Buffer
 
-	command(&out, "/config", config.Defaults(), "", testEnv(t), &fakeStepper{})
+	command(&out, "/config", config.Defaults(), "", testEnv(t), &fakeStepper{}, testRecorder(t))
 
 	if !strings.Contains(out.String(), "built-in defaults") {
 		t.Fatalf("output = %q, want the defaults noted as the source", out.String())
@@ -279,7 +288,7 @@ func TestCommandTagsRebuildsIndex(t *testing.T) {
 	t.Setenv("PATH", bin)
 
 	var out bytes.Buffer
-	command(&out, "/tags", config.Defaults(), "", testEnv(t), &fakeStepper{})
+	command(&out, "/tags", config.Defaults(), "", testEnv(t), &fakeStepper{}, testRecorder(t))
 
 	if !strings.Contains(out.String(), "rebuilt") {
 		t.Fatalf("output = %q, want a rebuild confirmation", out.String())
@@ -295,7 +304,7 @@ func TestCommandTagsReportsFailure(t *testing.T) {
 	t.Setenv("PATH", filepath.Join(t.TempDir(), "empty"))
 
 	var out bytes.Buffer
-	command(&out, "/tags", config.Defaults(), "", testEnv(t), &fakeStepper{})
+	command(&out, "/tags", config.Defaults(), "", testEnv(t), &fakeStepper{}, testRecorder(t))
 
 	if !strings.Contains(out.String(), "Error:") {
 		t.Fatalf("output = %q, want the rebuild failure reported", out.String())
@@ -305,7 +314,7 @@ func TestCommandTagsReportsFailure(t *testing.T) {
 func TestCommandUnknownSlashCommand(t *testing.T) {
 	var out bytes.Buffer
 
-	command(&out, "/bogus", config.Defaults(), "", testEnv(t), &fakeStepper{})
+	command(&out, "/bogus", config.Defaults(), "", testEnv(t), &fakeStepper{}, testRecorder(t))
 
 	if !strings.Contains(out.String(), "Unknown command") {
 		t.Fatalf("output = %q, want an unknown-command notice", out.String())
@@ -315,7 +324,7 @@ func TestCommandUnknownSlashCommand(t *testing.T) {
 func TestCommandIgnoresPlainInput(t *testing.T) {
 	var out bytes.Buffer
 
-	if quit := command(&out, "explain the loop", config.Defaults(), "", testEnv(t), &fakeStepper{}); quit {
+	if quit := command(&out, "explain the loop", config.Defaults(), "", testEnv(t), &fakeStepper{}, testRecorder(t)); quit {
 		t.Fatal("plain input asked the REPL to quit")
 	}
 	if out.String() != "" {
@@ -437,7 +446,7 @@ func TestCommandHistoryReportsTheBudget(t *testing.T) {
 	cfg := cfgFor("m")
 	cfg.MaxHistoryMessages = 60
 
-	command(&out, "/history", cfg, "", testEnv(t), bot)
+	command(&out, "/history", cfg, "", testEnv(t), bot, testRecorder(t))
 
 	for _, want := range []string{"12 messages", "3400 bytes", "budget: 60"} {
 		if !strings.Contains(out.String(), want) {
@@ -506,7 +515,7 @@ func TestRunReportsACancelledTurnAndKeepsGoing(t *testing.T) {
 	var out bytes.Buffer
 	bot := &fakeStepper{err: context.Canceled}
 
-	run(context.Background(), replFor("first\nsecond\n"), &out, cfgFor("m"), "", testEnv(t), bot, false)
+	run(context.Background(), replFor("first\nsecond\n"), &out, cfgFor("m"), "", testEnv(t), bot, testRecorder(t), false)
 
 	if !strings.Contains(out.String(), "cancelled") {
 		t.Fatalf("output = %q, want the cancellation reported", out.String())
@@ -524,6 +533,9 @@ func (contextStepper) Step(ctx context.Context, _ string) (string, error) { retu
 func (contextStepper) Reset()                                             {}
 func (contextStepper) HistorySize() (int, int)                            { return 0, 0 }
 func (contextStepper) LastUsage() (ollama.Usage, int)                     { return ollama.Usage{}, 0 }
+func (contextStepper) LastTools() []agent.ToolRun                         { return nil }
+func (contextStepper) Messages() []ollama.Message                         { return nil }
+func (contextStepper) Restore([]ollama.Message)                           {}
 func (contextStepper) AdvertisedTools() ([]string, int)                   { return nil, 0 }
 
 // signallingStepper raises a real SIGINT from inside the turn, which the
@@ -545,6 +557,9 @@ func (signallingStepper) Step(ctx context.Context, _ string) (string, error) {
 func (signallingStepper) Reset()                           {}
 func (signallingStepper) HistorySize() (int, int)          { return 0, 0 }
 func (signallingStepper) LastUsage() (ollama.Usage, int)   { return ollama.Usage{}, 0 }
+func (signallingStepper) LastTools() []agent.ToolRun       { return nil }
+func (signallingStepper) Messages() []ollama.Message       { return nil }
+func (signallingStepper) Restore([]ollama.Message)         {}
 func (signallingStepper) AdvertisedTools() ([]string, int) { return nil, 0 }
 
 func TestStepCancelsTheTurnOnInterrupt(t *testing.T) {
@@ -619,7 +634,7 @@ func TestExampleConfigMatchesDefaults(t *testing.T) {
 	t.Setenv("OLLAMA_HOST", "")
 	t.Setenv("OLLAMA_MODEL", "")
 
-	cfg, used, err := config.Load()
+	cfg, used, _, err := config.Load()
 	if err != nil {
 		t.Fatalf("config.Load() error = %v, want the example file to load cleanly", err)
 	}
@@ -659,7 +674,7 @@ func TestRunReportsTokenUsage(t *testing.T) {
 	var out bytes.Buffer
 	bot := &fakeStepper{reply: "ok", usage: ollama.Usage{PromptTokens: 1240, GenTokens: 89}, calls: 3}
 
-	run(context.Background(), replFor("hi\n"), &out, cfgFor("m"), "", testEnv(t), bot, false)
+	run(context.Background(), replFor("hi\n"), &out, cfgFor("m"), "", testEnv(t), bot, testRecorder(t), false)
 
 	for _, want := range []string{"1240 prompt", "89 generated", "3 tool calls"} {
 		if !strings.Contains(out.String(), want) {
@@ -672,7 +687,7 @@ func TestRunStaysQuietWhenTheServerReportsNoCounts(t *testing.T) {
 	var out bytes.Buffer
 	bot := &fakeStepper{reply: "ok"}
 
-	run(context.Background(), replFor("hi\n"), &out, cfgFor("m"), "", testEnv(t), bot, false)
+	run(context.Background(), replFor("hi\n"), &out, cfgFor("m"), "", testEnv(t), bot, testRecorder(t), false)
 
 	if strings.Contains(out.String(), "tool calls") {
 		t.Fatalf("output = %q, want no usage line when there is nothing to report", out.String())
@@ -685,7 +700,7 @@ func TestRunWarnsWhenThePromptCrowdsTheContextWindow(t *testing.T) {
 	cfg.NumCtx = 1000
 	bot := &fakeStepper{reply: "ok", usage: ollama.Usage{PromptTokens: 900, GenTokens: 10}}
 
-	run(context.Background(), replFor("hi\n"), &out, cfg, "", testEnv(t), bot, false)
+	run(context.Background(), replFor("hi\n"), &out, cfg, "", testEnv(t), bot, testRecorder(t), false)
 
 	if !strings.Contains(out.String(), "900 of 1000 context tokens") {
 		t.Fatalf("output = %q, want the context-pressure warning", out.String())
@@ -698,7 +713,7 @@ func TestRunDoesNotWarnBelowTheContextThreshold(t *testing.T) {
 	cfg.NumCtx = 1000
 	bot := &fakeStepper{reply: "ok", usage: ollama.Usage{PromptTokens: 100, GenTokens: 10}}
 
-	run(context.Background(), replFor("hi\n"), &out, cfg, "", testEnv(t), bot, false)
+	run(context.Background(), replFor("hi\n"), &out, cfg, "", testEnv(t), bot, testRecorder(t), false)
 
 	// Startup dependency warnings are unrelated; only the context one matters.
 	if strings.Contains(out.String(), "context tokens") {
@@ -895,7 +910,7 @@ func TestRunDoesNotReprintAStreamedReply(t *testing.T) {
 	var out bytes.Buffer
 	bot := &fakeStepper{reply: "already streamed"}
 
-	run(context.Background(), replFor("hi\n"), &out, cfgFor("m"), "", testEnv(t), bot, true)
+	run(context.Background(), replFor("hi\n"), &out, cfgFor("m"), "", testEnv(t), bot, testRecorder(t), true)
 
 	// The client's sink wrote the text; run must not write it again.
 	if strings.Contains(out.String(), "already streamed") {
@@ -926,7 +941,7 @@ func TestCommandConfigReportsTheAdvertisedTools(t *testing.T) {
 	var out bytes.Buffer
 	bot := &fakeStepper{advertised: []string{"view_slice", "apply_patch"}, schemaBytes: 400}
 
-	command(&out, "/config", config.Defaults(), "", testEnv(t), bot)
+	command(&out, "/config", config.Defaults(), "", testEnv(t), bot, testRecorder(t))
 
 	// The schemas are sent with every request, so their cost is a standing one
 	// and worth showing next to the budgets it competes with.
@@ -940,7 +955,7 @@ func TestCommandConfigReportsTheAdvertisedTools(t *testing.T) {
 func TestCommandConfigSaysWhenNoToolsAreAdvertised(t *testing.T) {
 	var out bytes.Buffer
 
-	command(&out, "/config", config.Defaults(), "", testEnv(t), &fakeStepper{})
+	command(&out, "/config", config.Defaults(), "", testEnv(t), &fakeStepper{}, testRecorder(t))
 
 	if !strings.Contains(out.String(), "tools: none advertised") {
 		t.Fatalf("/config output = %q, want the empty tool set stated", out.String())
@@ -981,5 +996,447 @@ func TestApproveOnEOFNamesWhatWasNotDone(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "command not run") {
 		t.Fatalf("approve() output = %q, want the refusal to name the kind", out.String())
+	}
+}
+
+// testRecorder gives the REPL a session recorder that writes into a scratch
+// directory, so tests exercise the saving path without leaving transcripts in
+// the repository.
+func testRecorder(t *testing.T) *recorder {
+	t.Helper()
+	cfg := config.Defaults()
+	cfg.SaveSessions = false
+	return newRecorder(session.Store{Root: t.TempDir()}, cfg, io.Discard)
+}
+
+func TestOneShotJSONReportsWhatTheRunCost(t *testing.T) {
+	dir := gitDir(t)
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "a.txt"}, {"-c", "commit.gpgsign=false", "commit", "-qm", "init"}} {
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	diff := "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n"
+	oneShotServer(t, []string{
+		`{"message":{"role":"assistant","tool_calls":[{"function":{"name":"apply_patch","arguments":` +
+			mustJSONMain(t, map[string]any{"diff": diff}) + `}}]},"done":true,"prompt_eval_count":120,"eval_count":30}`,
+		`{"message":{"role":"assistant","content":"Changed a.txt."},"done":true,"prompt_eval_count":140,"eval_count":10}`,
+	})
+
+	var out, errOut bytes.Buffer
+	code := runMain([]string{"-p", "change it", "--yes", "--json"}, strings.NewReader(""), &out, &errOut)
+
+	if code != 0 {
+		t.Fatalf("runMain() = %d, want 0\nstderr: %s", code, errOut.String())
+	}
+	var got Result
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("stdout is not one JSON object: %v\n%s", err, out.String())
+	}
+	if !got.OK || got.Answer != "Changed a.txt." {
+		t.Fatalf("result = %+v, want the answer and ok", got)
+	}
+	if got.Usage.Prompt != 260 || got.Usage.Generated != 40 {
+		t.Fatalf("usage = %+v, want the tokens summed across both calls", got.Usage)
+	}
+	if len(got.Tools) != 1 || got.Tools[0].Name != "apply_patch" {
+		t.Fatalf("tools = %+v, want the dispatched call recorded", got.Tools)
+	}
+	// Derived from git, so it is true whichever edit format was used and true
+	// for a file a permitted command wrote as a side effect.
+	if len(got.FilesChanged) != 1 || got.FilesChanged[0] != "a.txt" {
+		t.Fatalf("files_changed = %v, want [a.txt]", got.FilesChanged)
+	}
+}
+
+func TestOneShotJSONStillEmitsAnObjectOnFailure(t *testing.T) {
+	gitDir(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	t.Setenv("OLLAMA_HOST", srv.URL+"/api/chat")
+	t.Setenv("METRON_CONFIG", "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	var out, errOut bytes.Buffer
+	code := runMain([]string{"-p", "x", "--json"}, strings.NewReader(""), &out, &errOut)
+
+	if code != 1 {
+		t.Fatalf("runMain() = %d, want 1 when the model is unreachable", code)
+	}
+	// A caller that must distinguish "metron failed" from "metron printed
+	// nothing" has a worse job than it needs to; the exit code carries the
+	// verdict and the object carries the reason.
+	var got Result
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("stdout is not valid JSON on failure: %v\n%s", err, out.String())
+	}
+	if got.OK || got.Error == "" {
+		t.Fatalf("result = %+v, want ok=false with a reason", got)
+	}
+}
+
+func TestOneShotWithoutJSONPrintsOnlyTheAnswer(t *testing.T) {
+	gitDir(t)
+	oneShotServer(t, []string{`{"message":{"role":"assistant","content":"just this"},"done":true}`})
+
+	var out, errOut bytes.Buffer
+	if code := runMain([]string{"-p", "x"}, strings.NewReader(""), &out, &errOut); code != 0 {
+		t.Fatalf("runMain() = %d, want 0", code)
+	}
+	if strings.TrimSpace(out.String()) != "just this" {
+		t.Fatalf("stdout = %q, want only the answer so it stays pipeable", out.String())
+	}
+}
+
+func TestPorcelainPathHandlesRenamesAndQuoting(t *testing.T) {
+	for line, want := range map[string]string{
+		" M internal/tools/env.go": "internal/tools/env.go",
+		"?? new.go":                "new.go",
+		"R  old.go -> new.go":      "new.go",
+		`A  "quoted name.go"`:      "quoted name.go",
+		"":                         "",
+		"M":                        "",
+	} {
+		if got := porcelainPath(line); got != want {
+			t.Errorf("porcelainPath(%q) = %q, want %q", line, got, want)
+		}
+	}
+}
+
+func TestChangedSinceReportsNothingOutsideARepository(t *testing.T) {
+	// Without git there is no way to tell what changed, and inventing an answer
+	// would be worse than admitting it.
+	if got := changedSince(t.TempDir(), nil); len(got) != 0 {
+		t.Fatalf("changedSince() = %v, want empty outside a repository", got)
+	}
+}
+
+func TestTrackedChangesKeepsTheStatusColumns(t *testing.T) {
+	dir := gitDir(t)
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "a.txt"}, {"-c", "commit.gpgsign=false", "commit", "-qm", "init"}} {
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("new\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := trackedChanges(dir)
+
+	// An unstaged edit is reported as " M a.txt": the leading column is a
+	// space, and trimming the whole output before splitting shifts the path.
+	if !got["a.txt"] {
+		t.Fatalf("trackedChanges() = %v, want a.txt with its name intact", got)
+	}
+}
+
+func TestSessionsAreSavedAndResumed(t *testing.T) {
+	dir := gitDir(t)
+	// Saving is opt-in, because a transcript holds every file the model read --
+	// and it is privileged, so it must come from a config the operator chose
+	// rather than one that shipped with the repository.
+	oneShotServer(t, []string{`{"message":{"role":"assistant","content":"remembered"},"done":true}`})
+	cfgPath := filepath.Join(t.TempDir(), "metron.json")
+	if err := os.WriteFile(cfgPath, []byte(`{"save_sessions": true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("METRON_CONFIG", cfgPath)
+
+	var out, errOut bytes.Buffer
+	if code := runMain([]string{"-p", "first request"}, strings.NewReader(""), &out, &errOut); code != 0 {
+		t.Fatalf("runMain() = %d\n%s", code, errOut.String())
+	}
+
+	store := session.Store{Root: dir}
+	ids, err := store.List()
+	if err != nil || len(ids) != 1 {
+		t.Fatalf("List() = %v, %v, want the session written", ids, err)
+	}
+	_, msgs, err := store.Load(ids[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawRequest bool
+	for _, m := range msgs {
+		sawRequest = sawRequest || m.Content == "first request"
+	}
+	if !sawRequest {
+		t.Fatalf("transcript = %+v, want the request recorded", msgs)
+	}
+
+	// Resuming must carry the earlier turn into the next request.
+	var seen [][]byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seen = append(seen, body)
+		_, _ = w.Write([]byte(`{"message":{"role":"assistant","content":"ok"},"done":true}`))
+	}))
+	defer srv.Close()
+	t.Setenv("OLLAMA_HOST", srv.URL+"/api/chat")
+
+	out.Reset()
+	errOut.Reset()
+	if code := runMain([]string{"--resume-last", "-p", "second"}, strings.NewReader(""), &out, &errOut); code != 0 {
+		t.Fatalf("runMain(--resume-last) = %d\n%s", code, errOut.String())
+	}
+	if len(seen) == 0 || !bytes.Contains(seen[0], []byte("first request")) {
+		t.Fatalf("resumed request did not carry the earlier turn: %s", seen)
+	}
+}
+
+func TestResumeReportsAnUnknownSession(t *testing.T) {
+	gitDir(t)
+	t.Setenv("METRON_CONFIG", "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	var out, errOut bytes.Buffer
+	code := runMain([]string{"--resume", "nope", "-p", "x"}, strings.NewReader(""), &out, &errOut)
+
+	if code != 1 || !strings.Contains(errOut.String(), "nope") {
+		t.Fatalf("runMain() = %d, stderr = %q, want the unknown session reported", code, errOut.String())
+	}
+}
+
+func TestResumeLastWithNoSessions(t *testing.T) {
+	gitDir(t)
+	t.Setenv("METRON_CONFIG", "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	var out, errOut bytes.Buffer
+	code := runMain([]string{"--resume-last", "-p", "x"}, strings.NewReader(""), &out, &errOut)
+
+	if code != 1 || !strings.Contains(errOut.String(), "no saved sessions") {
+		t.Fatalf("runMain() = %d, stderr = %q, want a clear message", code, errOut.String())
+	}
+}
+
+func TestCommandSaveAndSessions(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Defaults()
+	cfg.SaveSessions = true
+	sess := newRecorder(session.Store{Root: dir}, cfg, io.Discard)
+	bot := &fakeStepper{messages: []ollama.Message{{Role: "user", Content: "hi"}}}
+
+	var out bytes.Buffer
+	command(&out, "/save", cfg, "", testEnv(t), bot, sess)
+	if !strings.Contains(out.String(), "Session saved to") {
+		t.Fatalf("/save = %q, want the path reported", out.String())
+	}
+
+	out.Reset()
+	command(&out, "/sessions", cfg, "", testEnv(t), bot, sess)
+	if !strings.Contains(out.String(), sess.meta.ID) || !strings.Contains(out.String(), "--resume") {
+		t.Fatalf("/sessions = %q, want the session listed with how to resume it", out.String())
+	}
+}
+
+func TestCommandSaveWhenSavingIsOff(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.SaveSessions = false
+	sess := newRecorder(session.Store{Root: t.TempDir()}, cfg, io.Discard)
+
+	var out bytes.Buffer
+	command(&out, "/save", cfg, "", testEnv(t), &fakeStepper{}, sess)
+
+	if !strings.Contains(out.String(), "save_sessions") {
+		t.Fatalf("/save = %q, want it to say how to turn saving on", out.String())
+	}
+}
+
+func TestCommandSessionsWhenThereAreNone(t *testing.T) {
+	cfg := config.Defaults()
+	sess := newRecorder(session.Store{Root: t.TempDir()}, cfg, io.Discard)
+
+	var out bytes.Buffer
+	command(&out, "/sessions", cfg, "", testEnv(t), &fakeStepper{}, sess)
+
+	if !strings.Contains(out.String(), "No saved sessions") {
+		t.Fatalf("/sessions = %q, want the empty case stated", out.String())
+	}
+}
+
+func TestRecorderWarnsOnceWhenItCannotSave(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can write anywhere")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	cfg := config.Defaults()
+	cfg.SaveSessions = true
+	var warn bytes.Buffer
+	sess := newRecorder(session.Store{Root: dir}, cfg, &warn)
+
+	sess.save(&fakeStepper{})
+	sess.save(&fakeStepper{})
+
+	// Losing the ability to record a conversation is not a reason to end it,
+	// and repeating the complaint every turn would bury the conversation.
+	if got := strings.Count(warn.String(), "could not save session"); got != 1 {
+		t.Fatalf("warned %d times, want exactly once", got)
+	}
+}
+
+func TestResumeWarnsWhenTheTreeHasMoved(t *testing.T) {
+	dir := gitDir(t)
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "a.txt"}, {"-c", "commit.gpgsign=false", "commit", "-qm", "init"}} {
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	store := session.Store{Root: dir}
+	if err := store.Save(session.Meta{ID: "20260101-000000", Model: "m", GitHead: "0000000000000000"}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Defaults()
+	sess := newRecorder(store, cfg, io.Discard)
+	var out bytes.Buffer
+	if err := sess.resume("20260101-000000", &fakeStepper{}, &out); err != nil {
+		t.Fatal(err)
+	}
+
+	// The transcript is full of line numbers and quoted code; if the tree moved
+	// underneath it, the operator is the one who should decide whether to care.
+	if !strings.Contains(out.String(), "has moved") {
+		t.Fatalf("resume output = %q, want the drift warning", out.String())
+	}
+}
+
+// TestApprovePreviewCannotLieAboutItself covers the fact that the preview is
+// written by the model. SECURITY.md names this prompt as the mitigation for
+// prompt injection -- "read the diffs" -- which only holds if the diff cannot
+// redraw the screen to show something other than what will apply.
+func TestApprovePreviewCannotLieAboutItself(t *testing.T) {
+	var out bytes.Buffer
+	hostile := "--- a/real.go\n\x1b[2J\x1b[H\x1b[1mProposed patch:\x1b[0m\n innocent\r hidden\n"
+
+	approve(&out, replFor("n\n"), "patch", hostile)
+
+	got := out.String()
+	// The escapes must be rendered, not executed.
+	if strings.Contains(got, "\x1b[2J") {
+		t.Fatal("a screen-clearing escape reached the terminal")
+	}
+	if !strings.Contains(got, `\x1b`) {
+		t.Fatalf("output = %q, want the escape shown literally", got)
+	}
+	if strings.Contains(strings.ReplaceAll(got, `\x0d`, ""), "\r") {
+		t.Fatal("a carriage return reached the terminal and could overwrite a line")
+	}
+	// Tabs survive: source code is full of them.
+	if !strings.Contains(escapeControl("a\tb"), "\t") {
+		t.Fatal("escapeControl ate a tab")
+	}
+}
+
+func TestApprovePreviewIsCapped(t *testing.T) {
+	var out bytes.Buffer
+	huge := strings.Repeat("+line\n", previewMaxLines+50)
+
+	approve(&out, replFor("n\n"), "patch", huge)
+
+	// An enormous diff would otherwise scroll the real hunk out of the
+	// scrollback, leaving only the tail above the [y/N].
+	if !strings.Contains(out.String(), "more lines not shown") {
+		t.Fatalf("output = %q, want the truncation declared", out.String())
+	}
+	if got := strings.Count(out.String(), "+line"); got > previewMaxLines {
+		t.Fatalf("rendered %d lines, want at most %d", got, previewMaxLines)
+	}
+}
+
+func TestConfigWarningsReachTheOperator(t *testing.T) {
+	dir := gitDir(t)
+	t.Setenv("METRON_CONFIG", "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if err := os.WriteFile(filepath.Join(dir, ".metron.json"),
+		[]byte(`{"auto_approve_patches": true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errOut bytes.Buffer
+	runMain([]string{"-p", "x"}, strings.NewReader(""), &out, &errOut)
+
+	// On stderr so it survives `metron -p ... 2>/dev/null | jq`, and loud
+	// because it is the operator learning that a repository tried to grant
+	// itself permissions.
+	if !strings.Contains(errOut.String(), "auto_approve_patches") {
+		t.Fatalf("stderr = %q, want the refused setting named", errOut.String())
+	}
+}
+
+func TestResumeTargetReportsAListingFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can read anything")
+	}
+	dir := t.TempDir()
+	store := session.Store{Root: dir}
+	if err := store.Save(session.Meta{ID: "20260101-000000"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	sessionsDir := filepath.Join(dir, session.Dir, "sessions")
+	if err := os.Chmod(sessionsDir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(sessionsDir, 0o700) })
+
+	if _, err := resumeTarget(store, flags{resumeLast: true}); err == nil {
+		t.Fatal("resumeTarget() = nil error when sessions cannot be listed")
+	}
+}
+
+func TestListSessionsReportsAFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can read anything")
+	}
+	dir := t.TempDir()
+	cfg := config.Defaults()
+	cfg.SaveSessions = true
+	sess := newRecorder(session.Store{Root: dir}, cfg, io.Discard)
+	sess.save(&fakeStepper{})
+	sessionsDir := filepath.Join(dir, session.Dir, "sessions")
+	if err := os.Chmod(sessionsDir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(sessionsDir, 0o700) })
+
+	var out bytes.Buffer
+	listSessions(&out, sess)
+
+	if !strings.Contains(out.String(), "Error:") {
+		t.Fatalf("listSessions() = %q, want the failure reported", out.String())
+	}
+}
+
+func TestOneShotJSONReportsAnEncodingFailure(t *testing.T) {
+	dir := gitDir(t)
+	var w jsonFailingWriter
+	var errOut bytes.Buffer
+	cfg := config.Defaults()
+	sess := newRecorder(session.Store{Root: dir}, cfg, io.Discard)
+	env := tools.NewEnv(tools.DefaultBudgets())
+	bot := &fakeStepper{reply: "x"}
+
+	code := oneShot(context.Background(), &w, &errOut, env, bot, sess,
+		flags{prompt: "x", asJSON: true})
+
+	if code != 1 || !strings.Contains(errOut.String(), "error:") {
+		t.Fatalf("oneShot() = %d, stderr = %q, want the encode failure reported", code, errOut.String())
 	}
 }

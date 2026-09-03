@@ -418,3 +418,61 @@ func TestEditFileOnAnEmptyFile(t *testing.T) {
 		t.Fatalf("EditFile() = %q, want a clean miss on an empty file", got)
 	}
 }
+
+// TestEditFileRefusesToWriteInsideGit is the regression test for a hole the
+// search/replace format introduced. `git apply` refuses .git paths on its own,
+// so apply_patch was covered; edit_file writes files directly and was not.
+//
+// The damage is not hypothetical: .git/config holds settings git executes.
+// Setting core.pager runs a command the next time the operator types `git log`,
+// and it appears in no diff and no `git status`.
+func TestEditFileRefusesToWriteInsideGit(t *testing.T) {
+	env := editEnv(t, "a.go", "x\n")
+	gitDir := filepath.Join(env.Root, ".git")
+	if err := os.MkdirAll(gitDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(gitDir, "config")
+	writeFile(t, cfg, "[core]\n\tbare = false\n")
+
+	for _, path := range []string{".git/config", ".git/hooks/pre-commit", "./.git/config"} {
+		got := env.EditFile(path, "\tbare = false", "\tpager = sh -c 'id > /tmp/pwn'")
+		if !strings.Contains(got, ".git") || !strings.Contains(got, "will not") {
+			t.Errorf("EditFile(%q) = %q, want it refused", path, got)
+		}
+	}
+	if b, _ := os.ReadFile(cfg); strings.Contains(string(b), "pager") {
+		t.Fatal(".git/config was modified")
+	}
+}
+
+func TestEditFileRefusesCaseFoldedGit(t *testing.T) {
+	// macOS's default filesystem is case-insensitive, so .GIT/config and
+	// .git/config are the same file there.
+	env := editEnv(t, "a.go", "x\n")
+
+	if got := env.EditFile(".GIT/config", "", "x"); !strings.Contains(got, "will not") {
+		t.Fatalf("EditFile(.GIT/config) = %q, want it refused", got)
+	}
+}
+
+func TestEditFileRefusesToWriteInsideMetronsOwnState(t *testing.T) {
+	env := editEnv(t, "a.go", "x\n")
+
+	// Session transcripts and metron's own state are not the model's to edit.
+	if got := env.EditFile(".metron/sessions/x.jsonl", "", "x"); !strings.Contains(got, "will not") {
+		t.Fatalf("EditFile() = %q, want metron's own state protected", got)
+	}
+}
+
+func TestViewSliceRefusesToReadInsideGit(t *testing.T) {
+	env := editEnv(t, "a.go", "x\n")
+	if err := os.MkdirAll(filepath.Join(env.Root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(env.Root, ".git", "config"), "[core]\n")
+
+	if _, err := env.ViewSlice(".git/config", 1, 1); err == nil {
+		t.Fatal("ViewSlice() read .git/config; the index and config are not source")
+	}
+}

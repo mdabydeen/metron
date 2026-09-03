@@ -56,14 +56,22 @@ func (e Env) RunCommand(ctx context.Context, command string) string {
 	// real work running after the timeout it was supposed to enforce.
 	setProcessGroup(cmd)
 	cmd.Cancel = func() error { return killProcessGroup(cmd) }
+	// The group kill does not reach a grandchild that called setsid, and such a
+	// process keeps the inherited output pipe open -- so CombinedOutput would
+	// block long past the deadline while the result claimed the command had
+	// been killed on time. WaitDelay makes Go close the pipes and return.
+	cmd.WaitDelay = commandWaitDelay
 
 	out, err := cmd.CombinedOutput()
 	body := clipOutput(string(out), e.Budgets.MaxCommandOutputBytes)
 
 	switch {
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):
-		return fmt.Sprintf("$ %s\ntimed out after %s and was killed.\n--- output so far ---\n%s",
-			command, timeout, body)
+		// "was killed" would overstate it: a process that left the group
+		// survives, and saying otherwise misleads both the model and the
+		// operator about what is still running.
+		return fmt.Sprintf("$ %s\ntimed out after %s; its process group was killed.\n"+
+			"--- output so far ---\n%s", command, timeout, body)
 	case err != nil:
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
@@ -150,3 +158,7 @@ func forwardToBoundary(s string) string {
 // all", which would make every command report a timeout it never had a chance
 // to avoid. Configured values are validated separately and are always larger.
 const commandTimeoutFloor = time.Second
+
+// commandWaitDelay is how long to wait, after the deadline, for output pipes to
+// close on their own before forcing them shut.
+const commandWaitDelay = 2 * time.Second

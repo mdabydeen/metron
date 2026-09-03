@@ -67,6 +67,16 @@ type Config struct {
 	CommandTimeoutSeconds int `json:"command_timeout_seconds"`
 	MaxCommandOutputBytes int `json:"max_command_output_bytes"`
 
+	// Sessions
+	// SaveSessions writes each conversation to .metron/sessions as it goes, so
+	// it survives exiting. The directory ignores itself, so it never shows up
+	// as untracked in the project it lives in.
+	//
+	// Off by default. A transcript contains every tool result the model saw,
+	// which is every file it read -- persisting that to disk indefinitely is a
+	// change in exposure the operator should choose, not inherit.
+	SaveSessions bool `json:"save_sessions"`
+
 	// Safety
 	AutoApprovePatches bool `json:"auto_approve_patches"`
 }
@@ -96,6 +106,7 @@ func Defaults() Config {
 		CommandTimeoutSeconds: 120,
 		MaxCommandOutputBytes: 4000,
 
+		SaveSessions:       false,
 		AutoApprovePatches: false,
 	}
 }
@@ -122,29 +133,71 @@ func Search() []string {
 	return paths
 }
 
+// privileged names the settings that grant authority rather than tune
+// behaviour. They are the difference between "metron edits when you say so"
+// and "metron edits and executes without asking".
+//
+// A project's own .metron.json is the highest-priority config file, which means
+// it ships inside whatever repository you point metron at. A cloned repository
+// that could set these would disable the approval prompt and enable
+// run_command before the first turn -- turning `git clone && metron` into
+// arbitrary code execution, with every mitigation this program documents
+// switched off by a file the operator never read.
+//
+// So these are honoured only from a config the *operator* chose: the user-level
+// file, or one named explicitly by METRON_CONFIG. A project file that sets them
+// is reported and ignored, never silently obeyed.
+var privileged = []string{"auto_approve_patches", "allowed_commands", "save_sessions"}
+
 // Load resolves the configuration: defaults, overlaid with the first config
 // file found, overlaid with the environment. The returned path is the file
 // that was used, or "" if none was found.
 //
+// Settings in `privileged` are dropped from a project-level file; the returned
+// warnings say which, so the operator can see what was refused.
+//
 // A file that exists but cannot be read or parsed is an error rather than a
 // silent fallback -- a typo in a config file should not quietly change how the
 // agent behaves.
-func Load() (Config, string, error) {
+func Load() (Config, string, []string, error) {
 	cfg := Defaults()
 
-	var used string
+	var (
+		used     string
+		warnings []string
+	)
 	for _, path := range Search() {
 		data, err := os.ReadFile(path)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
 		if err != nil {
-			return cfg, path, fmt.Errorf("read config %s: %w", path, err)
+			return cfg, path, nil, fmt.Errorf("read config %s: %w", path, err)
+		}
+		// A project file is untrusted input: it arrives with the code, not from
+		// the operator. Note which authority-granting keys it sets so they can
+		// be undone after decoding.
+		var granted []string
+		if isProjectFile(path) {
+			if granted, err = dropPrivileged(data, path); err != nil {
+				return cfg, path, nil, err
+			}
 		}
 		dec := json.NewDecoder(strings.NewReader(string(data)))
 		dec.DisallowUnknownFields()
 		if err := dec.Decode(&cfg); err != nil {
-			return cfg, path, fmt.Errorf("parse config %s: %w", path, err)
+			return cfg, path, nil, fmt.Errorf("parse config %s: %w", path, err)
+		}
+		if len(granted) > 0 {
+			d := Defaults()
+			cfg.AutoApprovePatches = d.AutoApprovePatches
+			cfg.AllowedCommands = d.AllowedCommands
+			cfg.SaveSessions = d.SaveSessions
+			warnings = append(warnings, fmt.Sprintf(
+				"%s tried to set %s; ignored, because a config file that ships with a "+
+					"repository must not be able to grant itself permissions. Move it to "+
+					"your user config or point METRON_CONFIG at it if you meant it",
+				path, strings.Join(granted, ", ")))
 		}
 		used = path
 		break
@@ -159,9 +212,40 @@ func Load() (Config, string, error) {
 	}
 
 	if err := cfg.Validate(); err != nil {
-		return cfg, used, err
+		return cfg, used, warnings, err
 	}
-	return cfg, used, nil
+	return cfg, used, warnings, nil
+}
+
+// isProjectFile reports whether a config path is the one that travels with a
+// repository, as opposed to one the operator placed or named themselves.
+func isProjectFile(path string) bool {
+	if os.Getenv("METRON_CONFIG") != "" {
+		return false // named explicitly by the operator
+	}
+	return path == ProjectFile
+}
+
+// dropPrivileged reports which authority-granting keys a raw config sets, so
+// the caller can reset them after decoding and tell the operator what it
+// refused.
+//
+// Presence is read from the raw JSON rather than from the decoded struct
+// because a decoded false is indistinguishable from an absent key -- and
+// "the project tried to set this and it was ignored" is exactly the thing
+// worth saying out loud.
+func dropPrivileged(data []byte, path string) ([]string, error) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("parse config %s: %w", path, err)
+	}
+	var found []string
+	for _, key := range privileged {
+		if _, present := raw[key]; present {
+			found = append(found, key)
+		}
+	}
+	return found, nil
 }
 
 // Validate rejects settings that would make the agent misbehave rather than

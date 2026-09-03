@@ -182,3 +182,49 @@ func TestPatchTargetsIgnoresANonDiff(t *testing.T) {
 		t.Fatalf("patchTargets() = %q, want nothing recognised", got)
 	}
 }
+
+// TestPatchTargetsSeesEveryWayADiffNamesAFile covers a gap review found: the
+// check read only ---/+++ headers, so a pure rename -- which carries neither --
+// passed through it entirely and was bounded by git alone. SECURITY.md claimed
+// an independent boundary that did not exist for that case.
+func TestPatchTargetsSeesEveryWayADiffNamesAFile(t *testing.T) {
+	rename := "diff --git a/old.go b/new.go\n" +
+		"similarity index 100%\nrename from old.go\nrename to ../escaped.go\n"
+
+	got := patchTargets(rename)
+
+	var sawEscape bool
+	for _, target := range got {
+		sawEscape = sawEscape || strings.Contains(target, "..")
+	}
+	if !sawEscape {
+		t.Fatalf("patchTargets(%q) = %v, want the rename target seen", rename, got)
+	}
+}
+
+func TestPatchTargetsUnquotesCEscapedPaths(t *testing.T) {
+	// git C-quotes paths with unusual bytes, so an escape can be hidden in an
+	// octal one: "b/\056\056/x" is really "b/../x".
+	quoted := "--- /dev/null\n+++ \"b/\\056\\056/escaped.go\"\n"
+
+	got := patchTargets(quoted)
+
+	if len(got) != 1 || !strings.Contains(got[0], "..") {
+		t.Fatalf("patchTargets() = %v, want the octal escape unquoted", got)
+	}
+}
+
+func TestApplyPatchRefusesARenameOutOfTheProject(t *testing.T) {
+	dir := workdir(t)
+	env := NewEnv(DefaultBudgets())
+	writeFile(t, filepath.Join(dir, "old.go"), "x\n")
+
+	got, err := env.ApplyPatch("diff --git a/old.go b/x\nrename from old.go\nrename to ../escaped.go\n")
+
+	if err != nil {
+		t.Fatalf("ApplyPatch() error = %v, want a refusal as text", err)
+	}
+	if !strings.Contains(got, "Patch rejected") {
+		t.Fatalf("ApplyPatch() = %q, want metron's own check to catch it", got)
+	}
+}

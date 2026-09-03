@@ -22,12 +22,19 @@ const truncationMarker = " ...[line truncated]"
 //
 // The path is resolved against the project root and refused if it escapes it.
 func (e Env) ViewSlice(path string, start, end int) (string, error) {
+	// Bounds are checked before any arithmetic on them. end-start on
+	// model-supplied numbers overflows: start=-5e18 with end=5e18 wraps to a
+	// negative width, sails past the budget check, and reads the whole file --
+	// defeating the one guarantee this program exists to make.
+	if start < 1 {
+		return "", fmt.Errorf("invalid line bounds: start (%d) must be 1 or greater", start)
+	}
 	if end < start {
 		return "", fmt.Errorf("invalid line bounds: end (%d) < start (%d)", end, start)
 	}
-	if end-start > e.Budgets.MaxSliceLines {
-		return "", fmt.Errorf("requested slice too large (%d lines). Limit requests to <= %d lines",
-			end-start, e.Budgets.MaxSliceLines)
+	if end-start > e.Budgets.MaxSliceLines || end-start < 0 {
+		return "", fmt.Errorf("requested slice too large. Limit requests to <= %d lines",
+			e.Budgets.MaxSliceLines)
 	}
 
 	resolved, err := e.resolve(path)
