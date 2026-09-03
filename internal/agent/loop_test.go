@@ -381,10 +381,10 @@ func TestCompactContextRedactsOnlyLargeSlices(t *testing.T) {
 
 	a.compactContext()
 
-	if a.messages[0].Content != "[File slice redacted after turn completion]" {
+	if !strings.Contains(a.messages[0].Content, "redacted after the turn") {
 		t.Errorf("large slice = %q, want it redacted", a.messages[0].Content)
 	}
-	if strings.HasPrefix(a.messages[1].Content, "[File slice") {
+	if strings.Contains(a.messages[1].Content, "redacted after the turn") {
 		t.Error("large non-slice tool output was redacted, want it kept")
 	}
 	if a.messages[2].Content != "    1 | short slice" {
@@ -410,7 +410,7 @@ func TestStepCompactsSlicesOnceTurnCompletes(t *testing.T) {
 	if _, err := a.Step(context.Background(), "read it"); err != nil {
 		t.Fatal(err)
 	}
-	if a.messages[3].Content != "[File slice redacted after turn completion]" {
+	if !strings.Contains(a.messages[3].Content, "redacted after the turn") {
 		t.Fatalf("tool message = %q, want it compacted after the turn", a.messages[3].Content)
 	}
 	// The model still saw the full slice during the turn.
@@ -603,14 +603,20 @@ func TestTrimHistoryKeepsTheSystemPromptAndTheNewestMessages(t *testing.T) {
 
 	a.trimHistory()
 
-	if len(a.messages) != 5 {
-		t.Fatalf("history = %d messages, want the system prompt plus 4", len(a.messages))
+	// The prompt, one line saying what was dropped, then the budgeted tail.
+	if len(a.messages) != 6 {
+		t.Fatalf("history = %d messages, want the prompt, an elision note and 4", len(a.messages))
 	}
 	if a.messages[0].Role != "system" {
 		t.Fatalf("history[0].Role = %q, want the system prompt kept", a.messages[0].Role)
 	}
-	if a.messages[1].Content != "6" || a.messages[4].Content != "9" {
-		t.Fatalf("history = %v, want the newest messages retained", a.messages[1:])
+	// Vanishing the earlier conversation silently leaves the model reasoning
+	// from a history it believes is complete.
+	if !strings.Contains(a.messages[1].Content, "earlier messages elided") {
+		t.Fatalf("history[1] = %q, want the gap stated", a.messages[1].Content)
+	}
+	if a.messages[2].Content != "6" || a.messages[5].Content != "9" {
+		t.Fatalf("history = %v, want the newest messages retained", a.messages[2:])
 	}
 }
 
@@ -720,7 +726,7 @@ func TestOptionsBoundCompactionThreshold(t *testing.T) {
 
 	a.compactContext()
 
-	if a.messages[0].Content != "[File slice redacted after turn completion]" {
+	if !strings.Contains(a.messages[0].Content, "redacted after the turn") {
 		t.Fatalf("message = %q, want the configured threshold applied", a.messages[0].Content)
 	}
 }
@@ -1199,7 +1205,8 @@ func TestRestoreTrimsToTheHistoryBudget(t *testing.T) {
 	a.Restore(saved)
 
 	// A transcript from a session with a larger budget must not blow this one's.
-	if len(a.messages) > 5 {
+	// The prompt, the elision note and the budgeted tail.
+	if len(a.messages) > 6 {
 		t.Fatalf("restored %d messages, want them trimmed to the budget", len(a.messages))
 	}
 }
@@ -1264,5 +1271,49 @@ func TestToIntRejectsEnormousNumbers(t *testing.T) {
 	}
 	if got := toInt(float64(42)); got != 42 {
 		t.Fatalf("toInt(42) = %d, want ordinary numbers unaffected", got)
+	}
+}
+
+func TestElisionNoteNamesWhatWasDropped(t *testing.T) {
+	dropped := []llm.Message{
+		{Role: "user", Content: "q"},
+		{Role: "tool", ToolName: "view_slice"},
+		{Role: "tool", ToolName: "view_slice"},
+		{Role: "tool", ToolName: "search_text"},
+		{Role: "assistant", Content: "a"},
+	}
+
+	got := elisionNote(dropped).Content
+
+	// Repeats are counted; a single call is not padded with "x1".
+	for _, want := range []string{"5 earlier messages elided", "view_slice x2", "search_text"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("elisionNote() = %q, missing %q", got, want)
+		}
+	}
+	if strings.Contains(got, "search_text x1") {
+		t.Errorf("elisionNote() = %q, want no count on a single call", got)
+	}
+}
+
+func TestElisionNoteWithNoToolCalls(t *testing.T) {
+	got := elisionNote([]llm.Message{{Role: "user", Content: "q"}}).Content
+
+	if !strings.Contains(got, "1 earlier messages elided") || strings.Contains(got, ":") {
+		t.Fatalf("elisionNote() = %q, want the count with no tool list", got)
+	}
+}
+
+func TestSliceHeaderFallsBackWhenThereIsNone(t *testing.T) {
+	// A tool result that is numbered lines with no header still has to redact
+	// to something the model can read.
+	if got := sliceHeader("    1 | code\n    2 | more"); got != "a file slice" {
+		t.Fatalf("sliceHeader() = %q, want the neutral description", got)
+	}
+	if got := sliceHeader("a.go:1-2\n    1 | code"); got != "a.go:1-2" {
+		t.Fatalf("sliceHeader() = %q, want the header used", got)
+	}
+	if got := sliceHeader("no newline at all"); got != "a file slice" {
+		t.Fatalf("sliceHeader() = %q, want the neutral description", got)
 	}
 }

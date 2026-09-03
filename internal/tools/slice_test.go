@@ -20,6 +20,15 @@ func numberedFile(t *testing.T, lines int) string {
 	return path
 }
 
+// body drops the file:range header ViewSlice now emits, so a test can assert on
+// the numbered lines alone.
+func body(out string) string {
+	if _, rest, found := strings.Cut(out, "\n"); found {
+		return rest
+	}
+	return out
+}
+
 func TestViewSliceReturnsNumberedRange(t *testing.T) {
 	path := numberedFile(t, 10)
 
@@ -28,7 +37,7 @@ func TestViewSliceReturnsNumberedRange(t *testing.T) {
 		t.Fatalf("ViewSlice() error = %v", err)
 	}
 	want := "    3 | line 3\n    4 | line 4\n    5 | line 5\n"
-	if got != want {
+	if body(got) != want {
 		t.Fatalf("ViewSlice() = %q, want %q", got, want)
 	}
 }
@@ -41,7 +50,7 @@ func TestViewSliceClampsToEndOfFile(t *testing.T) {
 		t.Fatalf("ViewSlice() error = %v", err)
 	}
 	want := "    2 | line 2\n    3 | line 3\n"
-	if got != want {
+	if body(got) != want {
 		t.Fatalf("ViewSlice() = %q, want %q", got, want)
 	}
 }
@@ -53,8 +62,10 @@ func TestViewSliceStartPastEndOfFileIsEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ViewSlice() error = %v", err)
 	}
-	if got != "" {
-		t.Fatalf("ViewSlice() = %q, want empty output", got)
+	// An empty result invites the model to guess another range; saying how long
+	// the file actually is ends that loop.
+	if !strings.Contains(got, "no such lines") || !strings.Contains(got, "has 3") {
+		t.Fatalf("ViewSlice() = %q, want the file's real length reported", got)
 	}
 }
 
@@ -135,7 +146,7 @@ func TestViewSliceClipsLongLinesToTheBudget(t *testing.T) {
 		t.Fatalf("ViewSlice() error = %v", err)
 	}
 	want := "    1 | " + strings.Repeat("ab", 5) + truncationMarker + "\n"
-	if got != want {
+	if body(got) != want {
 		t.Fatalf("ViewSlice() = %q, want %q", got, want)
 	}
 }

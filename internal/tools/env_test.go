@@ -257,3 +257,11 @@ func TestForbiddenSegmentHandlesAnUnrelatedPath(t *testing.T) {
 		t.Fatalf("forbiddenSegment() = %q, want no segment for an unrelatable path", got)
 	}
 }
+
+func TestRelFallsBackToTheAbsolutePath(t *testing.T) {
+	// Rel fails when the paths share no root. Tool output should still say
+	// something rather than nothing.
+	if got := (Env{Root: "/a/b"}).rel("relative/path"); got != "relative/path" {
+		t.Fatalf("rel() = %q, want the path passed through", got)
+	}
+}

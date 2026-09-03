@@ -457,13 +457,31 @@ func (a *Agent) progress() io.Writer {
 // then trims the history to its message budget.
 func (a *Agent) compactContext() {
 	for i := range a.messages {
-		if a.messages[i].Role == "tool" && len(a.messages[i].Content) > a.opts.CompactThreshold {
-			if strings.Contains(a.messages[i].Content, " | ") {
-				a.messages[i].Content = "[File slice redacted after turn completion]"
-			}
+		m := &a.messages[i]
+		if m.Role != "tool" || len(m.Content) <= a.opts.CompactThreshold {
+			continue
 		}
+		if !strings.Contains(m.Content, " | ") {
+			continue
+		}
+		// Name what was purged. An anonymous "[redacted]" tells the model that
+		// something is gone but not what, so it either re-reads blindly or
+		// carries on as if it still had the text. The header ViewSlice emits is
+		// exactly the identifier needed.
+		m.Content = fmt.Sprintf("[%s redacted after the turn; request it again if you still need it]",
+			sliceHeader(m.Content))
 	}
 	a.trimHistory()
+}
+
+// sliceHeader returns the file:range line a view_slice result starts with, or a
+// neutral description when the content does not carry one.
+func sliceHeader(content string) string {
+	header, _, found := strings.Cut(content, "\n")
+	if !found || header == "" || strings.Contains(header, " | ") {
+		return "a file slice"
+	}
+	return header
 }
 
 // trimHistory drops the oldest exchanges once history exceeds its budget.
@@ -473,6 +491,11 @@ func (a *Agent) compactContext() {
 // The system prompt is always kept, and trimming never leaves a leading tool
 // result: a tool message that outlived the assistant call it answers is a
 // dangling reference the model cannot interpret.
+//
+// What is dropped is replaced by one line saying so. Silently vanishing the
+// earlier conversation leaves the model reasoning from a history it thinks is
+// complete -- it will refer back to a decision it can no longer see, and be
+// confused by its own absence rather than by a stated gap.
 func (a *Agent) trimHistory() {
 	budget := a.opts.MaxHistoryMessages
 	if budget <= 0 || len(a.messages) == 0 {
@@ -482,11 +505,44 @@ func (a *Agent) trimHistory() {
 	if len(body) <= budget {
 		return
 	}
+	dropped := body[:len(body)-budget]
 	body = body[len(body)-budget:]
 	for len(body) > 0 && body[0].Role == "tool" {
+		dropped = append(dropped, body[0])
 		body = body[1:]
 	}
-	a.messages = append(a.messages[:1:1], body...)
+	a.messages = append(a.messages[:1:1], elisionNote(dropped))
+	a.messages = append(a.messages, body...)
+}
+
+// elisionNote summarises what trimming removed. It is mechanical on purpose: an
+// LLM-written summary costs a whole model call, and whether that buys anything
+// is a question for the benchmark rather than for an assumption.
+func elisionNote(dropped []llm.Message) llm.Message {
+	counts := map[string]int{}
+	var order []string
+	for _, m := range dropped {
+		if m.Role != "tool" || m.ToolName == "" {
+			continue
+		}
+		if counts[m.ToolName] == 0 {
+			order = append(order, m.ToolName)
+		}
+		counts[m.ToolName]++
+	}
+	var parts []string
+	for _, name := range order {
+		if n := counts[name]; n > 1 {
+			parts = append(parts, fmt.Sprintf("%s x%d", name, n))
+		} else {
+			parts = append(parts, name)
+		}
+	}
+	note := fmt.Sprintf("[%d earlier messages elided to stay within the context budget", len(dropped))
+	if len(parts) > 0 {
+		note += ": " + strings.Join(parts, ", ")
+	}
+	return llm.Message{Role: "system", Content: note + "]"}
 }
 
 // ToolRun is one dispatched tool call and how long it took. The duration is

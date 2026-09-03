@@ -49,11 +49,17 @@ func (e Env) ViewSlice(path string, start, end int) (string, error) {
 	defer f.Close()
 
 	var sb strings.Builder
+	// A header naming the file and range. It costs a few tokens and buys two
+	// things: the model can tell two slices apart without tracking which call
+	// produced which, and compaction can say what it purged rather than leaving
+	// an anonymous placeholder the model cannot act on.
+	fmt.Fprintf(&sb, "%s:%d-%d\n", e.rel(resolved), start, end)
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxScanBuffer)
-	lineIdx := 1
+	lineIdx, shown := 1, 0
 	for scanner.Scan() {
 		if lineIdx >= start && lineIdx <= end {
+			shown++
 			fmt.Fprintf(&sb, "%5d | %s\n", lineIdx, clipLine(scanner.Text(), e.Budgets.MaxLineChars))
 		}
 		if lineIdx > end {
@@ -63,6 +69,12 @@ func (e Env) ViewSlice(path string, start, end int) (string, error) {
 	}
 	if err := scanner.Err(); err != nil {
 		return "", err
+	}
+	if shown == 0 {
+		// Saying the file is shorter than the request ends the guess-another-
+		// range loop that an empty result invites.
+		return fmt.Sprintf("%s:%d-%d\n[no such lines; the file has %d]\n",
+			e.rel(resolved), start, end, lineIdx-1), nil
 	}
 	return sb.String(), nil
 }

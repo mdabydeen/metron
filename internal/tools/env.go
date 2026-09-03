@@ -216,3 +216,12 @@ func evalExisting(p string) (string, error) {
 func within(root, p string) bool {
 	return p == root || strings.HasPrefix(p, root+string(filepath.Separator))
 }
+
+// rel renders an absolute path back as project-relative, so tool output the
+// model reads never contains the operator's home directory.
+func (e Env) rel(p string) string {
+	if r, err := filepath.Rel(e.Root, p); err == nil {
+		return r
+	}
+	return p
+}
