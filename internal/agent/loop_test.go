@@ -673,6 +673,66 @@ func TestTrimHistoryHandlesEmptyHistory(t *testing.T) {
 	}
 }
 
+// TestStepTrimsAHistoryThatOverflowsTheBudget proves the trimming the trim tests
+// above check by hand still happens inside the real loop. compactContext is the
+// only thing that calls trimHistory, and Step is the only thing that calls
+// compactContext; the compaction test that does go through Step runs with the
+// default 60-message budget, so its trim is a no-op. A session long enough to
+// overflow a tiny budget is what actually exercises the link -- and drop the
+// trimHistory call and this turns red, which the others cannot.
+func TestStepTrimsAHistoryThatOverflowsTheBudget(t *testing.T) {
+	dir := isolate(t)
+	if err := os.WriteFile(filepath.Join(dir, "small.go"), []byte("alpha\nbeta\ngamma\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	opts := DefaultOptions()
+	opts.MaxHistoryMessages = 3 // small enough that six tool rounds must overflow it
+	opts.MaxTurns = 10
+
+	// Six tool rounds, then an answer. Each round appends an assistant call and a
+	// tool result, so the history handed to the model far exceeds the budget
+	// before the final answer lets compactContext trim it. The slices are small,
+	// so this isolates trimming from the redaction the other compaction test
+	// covers.
+	var replies []ollama.Message
+	for i := 0; i < 6; i++ {
+		replies = append(replies, toolCall("view_slice",
+			map[string]any{"path": "small.go", "start": float64(1), "end": float64(1)}))
+	}
+	replies = append(replies, ollama.Message{Role: "assistant", Content: "finished"})
+	fake := &fakeChatter{replies: replies}
+	a := New(fake, opts)
+
+	got, err := a.Step(context.Background(), "work the small file")
+	if err != nil {
+		t.Fatalf("Step() error = %v", err)
+	}
+	if got != "finished" {
+		t.Fatalf("Step() = %q, want the final answer", got)
+	}
+	// The model was asked many times, so this was a session genuinely long enough
+	// to overflow the budget rather than a one-liner that merely fit it.
+	if fake.calls < 7 {
+		t.Fatalf("model calls = %d, want at least 7 for a session that overflows", fake.calls)
+	}
+
+	// The loop itself bounded the history to the system prompt plus the budget; a
+	// test that calls trimHistory by hand cannot establish this through Step.
+	if got := len(a.messages); got > 1+opts.MaxHistoryMessages {
+		t.Fatalf("history = %d messages, want at most the system prompt plus %d", got, opts.MaxHistoryMessages)
+	}
+	if a.messages[0].Role != "system" {
+		t.Fatalf("history[0].Role = %q, want the system prompt kept first", a.messages[0].Role)
+	}
+	// Trimming must never leave a tool result without the call it answers.
+	if a.messages[1].Role == "tool" {
+		t.Fatalf("history = %v, want no orphan tool result after the system prompt", a.messages[1:])
+	}
+	if last := a.messages[len(a.messages)-1]; last.Content != "finished" {
+		t.Fatalf("history = %v, want the final answer retained as the last message", a.messages[:])
+	}
+}
+
 func TestHistorySizeReportsCountAndBytes(t *testing.T) {
 	a := New(&fakeChatter{}, DefaultOptions())
 	a.messages = []ollama.Message{{Role: "system", Content: "abc"}, {Role: "user", Content: "de"}}
