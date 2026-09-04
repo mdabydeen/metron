@@ -6,7 +6,37 @@ on:
   pull_request:
 
 jobs:
+  # The default suite is hermetic by contract: no Ollama server, no ripgrep and
+  # no Universal Ctags. This job deliberately installs none of them, so a test
+  # that starts depending on the host fails here rather than on someone's laptop.
+  hermetic:
+    name: Hermetic suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+
+      # Guarantee the precondition rather than hoping the runner image happens
+      # to satisfy it: strip the binaries if present, then assert they are gone.
+      - name: Remove the optional binaries
+        run: |
+          sudo apt-get remove -y ripgrep universal-ctags exuberant-ctags >/dev/null 2>&1 || true
+          for bin in rg ctags; do
+            if command -v "$bin" >/dev/null 2>&1; then
+              echo "::error::$bin is still on PATH at $(command -v "$bin"); the hermetic suite must run without it"
+              exit 1
+            fi
+          done
+          echo "rg and ctags absent, as required"
+
+      - name: Test
+        run: go test ./...
+
   test:
+    name: Full suite
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -32,7 +62,62 @@ jobs:
       - name: Race
         run: go test -tags=integration -race -count=1 ./...
 
-      - name: Coverage
+      # metron holds 100% statement coverage. That is only ever true or
+      # abandoned, so it is enforced rather than remembered.
+      - name: Coverage gate
         run: |
           go test -tags=integration -covermode=count -coverprofile=coverage.out ./...
           go tool cover -func=coverage.out | tail -1
+          total=$(go tool cover -func=coverage.out | tail -1 | grep -oE '[0-9]+\.[0-9]+')
+          if awk -v t="$total" 'BEGIN { exit (t < 100) ? 0 : 1 }'; then
+            echo "::error::statement coverage is ${total}%, and this project requires 100%"
+            go tool cover -func=coverage.out | awk '$3 != "100.0%" && NF == 3'
+            exit 1
+          fi
+          echo "statement coverage: ${total}%"
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+
+      # Version deliberately unpinned: the action's default tracks a v2 release
+      # that matches the v2 schema in .golangci.yml. Pin it once a known-good
+      # version has actually been run against this repo.
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          # Pinned, and kept in step with GOLANGCI_VERSION in the Makefile. The
+          # action installs the latest release by default, so a new golangci-lint
+          # can turn an untouched PR red -- which is how this job first failed,
+          # on a check that did not exist when the config was written. Bump it
+          # deliberately, having run that same version locally.
+          version: v2.13.2
+
+  # Validates .goreleaser.yaml and exercises a full cross-platform build on
+  # every PR, so a broken release config surfaces here instead of at tag time.
+  release-config:
+    name: Release config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: '~> v2'
+          args: check
+
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: '~> v2'
+          args: build --snapshot --clean

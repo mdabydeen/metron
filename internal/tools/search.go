@@ -8,13 +8,20 @@ import (
 	"strings"
 )
 
-// SearchText greps the working directory, capped at maxPerFile matches per file
-// and maxMatches results overall, to preserve the model's context window.
+// SearchText greps the project, capped at SearchMaxPerFile matches per file and
+// SearchMaxMatches results overall, to preserve the model's context window.
 //
 // Only the per-file cap can be delegated to ripgrep: -m and --max-count are the
 // same flag, and it is per file, so the overall budget has to be applied here.
-func SearchText(pattern string, maxMatches, maxPerFile int) (string, error) {
-	cmd := exec.Command("rg", "-n", "--max-count="+strconv.Itoa(maxPerFile), pattern, ".")
+//
+// The pattern is passed after a `--` separator. Without it a model-supplied
+// pattern beginning with a dash -- "--files", say -- is parsed by ripgrep as a
+// flag, which silently changes what the tool does and bypasses the match
+// budget entirely.
+func (e Env) SearchText(pattern string) (string, error) {
+	cmd := exec.Command("rg", "-n", "--max-count="+strconv.Itoa(e.Budgets.SearchMaxPerFile),
+		"--", pattern, ".")
+	cmd.Dir = e.Root
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		var exitErr *exec.ExitError
@@ -34,9 +41,10 @@ func SearchText(pattern string, maxMatches, maxPerFile int) (string, error) {
 	}
 
 	lines := strings.Split(trimmed, "\n")
-	if len(lines) > maxMatches {
-		lines = lines[:maxMatches]
-		lines = append(lines, fmt.Sprintf("[truncated to %d matches; narrow the pattern]", maxMatches))
+	if len(lines) > e.Budgets.SearchMaxMatches {
+		lines = lines[:e.Budgets.SearchMaxMatches]
+		lines = append(lines, fmt.Sprintf("[truncated to %d matches; narrow the pattern]",
+			e.Budgets.SearchMaxMatches))
 	}
 	return strings.Join(lines, "\n"), nil
 }

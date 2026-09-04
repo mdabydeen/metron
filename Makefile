@@ -3,15 +3,16 @@ INSTALL_PATH=/usr/local/bin
 COVERPROFILE=coverage.out
 DOCKER_IMAGE=metron-test
 
-.PHONY: build install test race cover vet fmt check \
-        docker-build docker-test docker-race docker-cover test-live clean
+.PHONY: build install test race cover vet fmt lint check \
+        docker-build docker-test docker-race docker-cover test-live \
+        release-check release-snapshot clean
 
 # ---------------------------------------------------------------- build ----
 
 VERSION?=$(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
 build:
-	go build -ldflags="-s -w -X main.version=$(VERSION)" -o bin/$(BINARY_NAME) main.go
+	go build -ldflags="-s -w -X main.version=$(VERSION)" -o bin/$(BINARY_NAME) ./cmd/metron
 
 install: build
 	sudo cp bin/$(BINARY_NAME) $(INSTALL_PATH)/$(BINARY_NAME)
@@ -36,7 +37,31 @@ vet:
 fmt:
 	gofmt -l -w .
 
+# Needs golangci-lint on PATH; CI runs this too.
+# GOLANGCI_VERSION must match the pin in .github/workflows/ci.yml: a newer
+# release can add checks and fail a PR that touched none of the code they cover.
+GOLANGCI_VERSION?=v2.13.2
+
+lint:
+	@have=$$(golangci-lint version 2>/dev/null | grep -o 'version [^ ]*' | cut -d' ' -f2); \
+	want=$$(echo $(GOLANGCI_VERSION) | tr -d v); \
+	if [ "$$have" != "$$want" ]; then \
+	  echo "warning: golangci-lint $$have on PATH, CI pins $$want"; \
+	  echo "         go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_VERSION)"; \
+	fi
+	golangci-lint run
+
 check: vet test race cover
+
+# ---------------------------------------------------------- release -------
+# Both need goreleaser on PATH. CI runs them on every PR, so a broken release
+# config fails there rather than at tag time.
+
+release-check:
+	goreleaser check
+
+release-snapshot:
+	goreleaser build --snapshot --clean
 
 # ----------------------------------------------------- tests (docker) ------
 # Adds the `integration` tests, which need real ripgrep, Universal Ctags and
@@ -61,7 +86,7 @@ docker-cover: docker-build
 # pin a model; otherwise the smallest tool-capable installed model is used.
 
 test-live:
-	go test -tags=live -run Live -v -timeout 30m .
+	go test -tags=live -run Live -v -timeout 30m ./cmd/metron
 
 clean:
-	rm -rf bin/ .tags $(COVERPROFILE)
+	rm -rf bin/ dist/ .tags $(COVERPROFILE)

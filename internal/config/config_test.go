@@ -3,8 +3,11 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/mdabydeen/metron/internal/tools"
 )
 
 // isolate removes every source of configuration so a test starts from a known
@@ -36,7 +39,7 @@ func TestLoadWithoutAnyConfigFile(t *testing.T) {
 	if path != "" {
 		t.Fatalf("path = %q, want empty when no file exists", path)
 	}
-	if cfg != Defaults() {
+	if !reflect.DeepEqual(cfg, Defaults()) {
 		t.Fatalf("Load() = %+v, want the defaults", cfg)
 	}
 }
@@ -270,4 +273,63 @@ func TestSearchOrder(t *testing.T) {
 			t.Fatalf("Search() = %v, want the second entry to be %q", got, want)
 		}
 	})
+}
+
+func TestValidateRejectsUnknownDisabledTools(t *testing.T) {
+	cfg := Defaults()
+	cfg.DisabledTools = []string{"view_slice", "vieuw_slice"}
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() = nil, want a typo in disabled_tools rejected")
+	}
+	// A silently-ignored typo would leave the tool enabled, which is the
+	// opposite of what the operator asked for.
+	if !strings.Contains(err.Error(), "vieuw_slice") {
+		t.Fatalf("Validate() error = %v, want it to name the unknown tool", err)
+	}
+	if !strings.Contains(err.Error(), "view_slice") {
+		t.Fatalf("Validate() error = %v, want it to list the known tools", err)
+	}
+}
+
+func TestValidateAcceptsEveryKnownTool(t *testing.T) {
+	cfg := Defaults()
+	cfg.DisabledTools = append([]string{}, tools.ToolNames...)
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() = %v, want every known tool name accepted", err)
+	}
+}
+
+func TestValidateRejectsABlankAllowedCommand(t *testing.T) {
+	cfg := Defaults()
+	cfg.AllowedCommands = []string{"go test", "  "}
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() = nil, want a blank allowed_commands entry rejected")
+	}
+	// A blank entry parses to a zero-length prefix, which every argv begins
+	// with -- so the typo would permit everything rather than nothing.
+	if !strings.Contains(err.Error(), "allowed_commands[1]") {
+		t.Fatalf("Validate() error = %v, want it to name the offending entry", err)
+	}
+}
+
+func TestValidateRejectsNonPositiveCommandBudgets(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		apply func(*Config)
+	}{
+		{"command_timeout_seconds", func(c *Config) { c.CommandTimeoutSeconds = 0 }},
+		{"max_command_output_bytes", func(c *Config) { c.MaxCommandOutputBytes = -1 }},
+	} {
+		cfg := Defaults()
+		tc.apply(&cfg)
+		err := cfg.Validate()
+		if err == nil || !strings.Contains(err.Error(), tc.name) {
+			t.Errorf("Validate() error = %v, want %s rejected", err, tc.name)
+		}
+	}
 }

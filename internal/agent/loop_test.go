@@ -11,7 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"metron/internal/ollama"
+	"github.com/mdabydeen/metron/internal/ollama"
+	"github.com/mdabydeen/metron/internal/tools"
 )
 
 // fakeChatter replays a scripted sequence of model replies and records the
@@ -59,7 +60,53 @@ func isolate(t *testing.T) string {
 	return dir
 }
 
+// equipped is isolate with stand-ins for every external binary on PATH, so the
+// agent finds nothing missing and advertises the full tool set.
+func equipped(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	t.Chdir(dir)
+	bin := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		// echo is shimmed too: equipped replaces PATH wholesale, so a test that
+		// actually runs a command needs one that exists inside it.
+		"echo":  "printf '%s\\n' \"$*\"\n",
+		"rg":    "exit 0\n",
+		"ctags": "case \"$1\" in --version) echo 'Universal Ctags 6.1.0'; exit 0;; esac\nexit 0\n",
+		"git": "case \"$1 $2\" in\n" +
+			"  \"rev-parse --is-inside-work-tree\") echo true; exit 0;;\n" +
+			"  \"rev-parse --show-toplevel\") pwd; exit 0;;\n" +
+			"esac\nexit 0\n",
+	} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", bin)
+	return dir
+}
+
+// fullAgent advertises every tool whatever the environment holds. Dispatch
+// tests are about routing and about failures being reported as text the model
+// can read; which tools are on offer is a separate question, covered by the
+// advertisement tests.
+func fullAgent(client Chatter, opts Options) *Agent {
+	a := New(client, opts)
+	a.advertised = tools.ToolNames
+	a.schemas = a.schemas[:0]
+	for _, name := range tools.ToolNames {
+		a.schemas = append(a.schemas, toolDefs[name])
+	}
+	a.unavailable = nil
+	a.messages[0].Content = systemPrompt(tools.ToolNames)
+	return a
+}
+
 func TestNewSeedsSystemPrompt(t *testing.T) {
+	equipped(t)
 	a := New(&fakeChatter{}, DefaultOptions())
 
 	if len(a.messages) != 1 || a.messages[0].Role != "system" {
@@ -94,6 +141,7 @@ func TestStepReturnsAnswerWithoutToolCalls(t *testing.T) {
 }
 
 func TestStepAdvertisesEveryTool(t *testing.T) {
+	equipped(t)
 	fake := &fakeChatter{}
 	if _, err := New(fake, DefaultOptions()).Step(context.Background(), "hi"); err != nil {
 		t.Fatal(err)
@@ -232,7 +280,7 @@ func TestDispatchRoutesToolsAndReportsErrors(t *testing.T) {
 		"Alpha\tsample.go\t/^Alpha$/;\"\tkind:func\tline:1\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	a := New(&fakeChatter{}, DefaultOptions())
+	a := fullAgent(&fakeChatter{}, DefaultOptions())
 
 	tests := []struct {
 		name string
@@ -250,7 +298,7 @@ func TestDispatchRoutesToolsAndReportsErrors(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := a.dispatch(tc.call.ToolCalls[0])
+			got := a.dispatch(context.Background(), tc.call.ToolCalls[0])
 			if !strings.Contains(got, tc.want) {
 				t.Fatalf("dispatch() = %q, want it to contain %q", got, tc.want)
 			}
@@ -260,9 +308,9 @@ func TestDispatchRoutesToolsAndReportsErrors(t *testing.T) {
 
 func TestDispatchFindSymbolReportsToolError(t *testing.T) {
 	isolate(t) // no .tags and no ctags binary
-	a := New(&fakeChatter{}, DefaultOptions())
+	a := fullAgent(&fakeChatter{}, DefaultOptions())
 
-	got := a.dispatch(toolCall("find_symbol", map[string]any{"symbol": "Alpha"}).ToolCalls[0])
+	got := a.dispatch(context.Background(), toolCall("find_symbol", map[string]any{"symbol": "Alpha"}).ToolCalls[0])
 	if !strings.HasPrefix(got, "Error:") {
 		t.Fatalf("dispatch() = %q, want the ctags failure reported as text", got)
 	}
@@ -274,7 +322,7 @@ func TestDispatchAppliesPatch(t *testing.T) {
 	a := New(&fakeChatter{}, DefaultOptions())
 
 	diff := "--- a/target.txt\n+++ b/target.txt\n@@ -1 +1 @@\n-alpha\n+omega\n"
-	got := a.dispatch(toolCall("apply_patch", map[string]any{"diff": diff}).ToolCalls[0])
+	got := a.dispatch(context.Background(), toolCall("apply_patch", map[string]any{"diff": diff}).ToolCalls[0])
 	if !strings.Contains(got, "successfully applied") {
 		t.Fatalf("dispatch() = %q, want a success report", got)
 	}
@@ -297,7 +345,7 @@ func TestDispatchListFilesSuccess(t *testing.T) {
 	t.Setenv("PATH", bin)
 	a := New(&fakeChatter{}, DefaultOptions())
 
-	got := a.dispatch(toolCall("list_files", map[string]any{"pattern": "*.go"}).ToolCalls[0])
+	got := a.dispatch(context.Background(), toolCall("list_files", map[string]any{"pattern": "*.go"}).ToolCalls[0])
 	if got != "main.go" {
 		t.Fatalf("dispatch() = %q, want the file listing", got)
 	}
@@ -316,7 +364,7 @@ func TestDispatchSearchTextSuccess(t *testing.T) {
 	t.Setenv("PATH", bin)
 	a := New(&fakeChatter{}, DefaultOptions())
 
-	got := a.dispatch(toolCall("search_text", map[string]any{"pattern": "needle"}).ToolCalls[0])
+	got := a.dispatch(context.Background(), toolCall("search_text", map[string]any{"pattern": "needle"}).ToolCalls[0])
 	if got != "./a.go:1:needle" {
 		t.Fatalf("dispatch() = %q, want the ripgrep output", got)
 	}
@@ -431,7 +479,7 @@ func TestResetClearsHistoryButKeepsTheSystemPrompt(t *testing.T) {
 	if len(a.messages) != 1 || a.messages[0].Role != "system" {
 		t.Fatalf("history after Reset = %+v, want only the system prompt", a.messages)
 	}
-	if a.messages[0].Content != systemPrompt {
+	if a.messages[0].Content != systemPrompt(a.advertised) {
 		t.Fatal("Reset did not restore the system prompt")
 	}
 
@@ -451,9 +499,9 @@ func TestDispatchWritesProgressToTheConfiguredWriter(t *testing.T) {
 	var progress bytes.Buffer
 	opts := DefaultOptions()
 	opts.Progress = &progress
-	a := New(&fakeChatter{}, opts)
+	a := fullAgent(&fakeChatter{}, opts)
 
-	a.dispatch(toolCall("find_symbol", map[string]any{"symbol": "Greet"}).ToolCalls[0])
+	a.dispatch(context.Background(), toolCall("find_symbol", map[string]any{"symbol": "Greet"}).ToolCalls[0])
 
 	if !strings.Contains(progress.String(), "[executing: find_symbol]") {
 		t.Fatalf("progress = %q, want the tool execution notice", progress.String())
@@ -462,10 +510,10 @@ func TestDispatchWritesProgressToTheConfiguredWriter(t *testing.T) {
 
 func TestDispatchDiscardsProgressWhenNoWriterIsSet(t *testing.T) {
 	isolate(t)
-	a := New(&fakeChatter{}, DefaultOptions())
+	a := fullAgent(&fakeChatter{}, DefaultOptions())
 
 	// The nil-writer path must not panic and must not reach for stdout.
-	if got := a.dispatch(toolCall("find_symbol", map[string]any{"symbol": "X"}).ToolCalls[0]); got == "" {
+	if got := a.dispatch(context.Background(), toolCall("find_symbol", map[string]any{"symbol": "X"}).ToolCalls[0]); got == "" {
 		t.Fatal("dispatch() = \"\", want the tool result regardless of progress writer")
 	}
 }
@@ -476,13 +524,13 @@ func TestDispatchAsksBeforeApplyingAPatch(t *testing.T) {
 
 	var seen string
 	opts := DefaultOptions()
-	opts.Approve = func(diff string) bool {
-		seen = diff
+	opts.Approve = func(_, preview string) bool {
+		seen = preview
 		return false
 	}
-	a := New(&fakeChatter{}, opts)
+	a := fullAgent(&fakeChatter{}, opts)
 
-	got := a.dispatch(toolCall("apply_patch", map[string]any{"diff": "--- a/x\n+++ b/x\n"}).ToolCalls[0])
+	got := a.dispatch(context.Background(), toolCall("apply_patch", map[string]any{"diff": "--- a/x\n+++ b/x\n"}).ToolCalls[0])
 
 	if seen != "--- a/x\n+++ b/x\n" {
 		t.Fatalf("approver saw %q, want the model's diff", seen)
@@ -501,14 +549,14 @@ func TestDispatchAppliesWhenTheOperatorApproves(t *testing.T) {
 
 	opts := DefaultOptions()
 	approved := false
-	opts.Approve = func(string) bool {
+	opts.Approve = func(string, string) bool {
 		approved = true
 		return true
 	}
 	a := New(&fakeChatter{}, opts)
 
 	diff := "--- a/target.txt\n+++ b/target.txt\n@@ -1 +1 @@\n-alpha\n+omega\n"
-	got := a.dispatch(toolCall("apply_patch", map[string]any{"diff": diff}).ToolCalls[0])
+	got := a.dispatch(context.Background(), toolCall("apply_patch", map[string]any{"diff": diff}).ToolCalls[0])
 
 	if !approved {
 		t.Fatal("approver was not consulted")
@@ -642,10 +690,10 @@ func TestOptionsBoundToolBudgets(t *testing.T) {
 		t.Fatal(err)
 	}
 	opts := DefaultOptions()
-	opts.MaxSliceLines = 1
+	opts.Env.Budgets.MaxSliceLines = 1
 	a := New(&fakeChatter{}, opts)
 
-	got := a.dispatch(toolCall("view_slice", map[string]any{"path": "sample.go", "start": 1, "end": 4}).ToolCalls[0])
+	got := a.dispatch(context.Background(), toolCall("view_slice", map[string]any{"path": "sample.go", "start": 1, "end": 4}).ToolCalls[0])
 	if !strings.Contains(got, "<= 1 lines") {
 		t.Fatalf("dispatch() = %q, want the configured slice budget enforced", got)
 	}
@@ -691,10 +739,10 @@ func TestSearchBudgetsReachRipgrep(t *testing.T) {
 	t.Setenv("PATH", bin)
 
 	opts := DefaultOptions()
-	opts.SearchMaxMatches, opts.SearchMaxPerFile = 3, 1
+	opts.Env.Budgets.SearchMaxMatches, opts.Env.Budgets.SearchMaxPerFile = 3, 1
 	a := New(&fakeChatter{}, opts)
 
-	a.dispatch(toolCall("search_text", map[string]any{"pattern": "needle"}).ToolCalls[0])
+	a.dispatch(context.Background(), toolCall("search_text", map[string]any{"pattern": "needle"}).ToolCalls[0])
 
 	argv, err := os.ReadFile(filepath.Join(dir, "argv"))
 	if err != nil {
@@ -744,5 +792,241 @@ func TestLastUsageResetsBetweenTurns(t *testing.T) {
 	usage, _ := a.LastUsage()
 	if usage.PromptTokens != 7 || usage.GenTokens != 3 {
 		t.Fatalf("LastUsage() = %+v, want only the most recent turn", usage)
+	}
+}
+
+func TestNewAdvertisesOnlyUsableTools(t *testing.T) {
+	isolate(t) // nothing on PATH: only view_slice can run
+
+	a := New(&fakeChatter{}, DefaultOptions())
+
+	names, schemaBytes := a.AdvertisedTools()
+	if len(names) != 1 || names[0] != tools.ToolViewSlice {
+		t.Fatalf("AdvertisedTools() = %v, want only view_slice", names)
+	}
+	if schemaBytes <= 0 {
+		t.Fatalf("AdvertisedTools() schema bytes = %d, want the cost reported", schemaBytes)
+	}
+	// The prompt must not name tools the model has no schema for; doing so
+	// spends tokens describing what it cannot call, and invites it to try.
+	for _, absent := range []string{tools.ToolFindSymbol, tools.ToolSearchText, tools.ToolApplyPatch} {
+		if strings.Contains(a.messages[0].Content, absent) {
+			t.Errorf("system prompt names %q, which is not advertised:\n%s", absent, a.messages[0].Content)
+		}
+	}
+}
+
+func TestStepSendsOnlyTheAdvertisedSchemas(t *testing.T) {
+	isolate(t)
+	fake := &fakeChatter{}
+
+	if _, err := New(fake, DefaultOptions()).Step(context.Background(), "hi"); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(fake.tools) != 1 {
+		t.Fatalf("sent %d schemas, want only the usable one", len(fake.tools))
+	}
+}
+
+func TestDisabledToolsAreNotAdvertised(t *testing.T) {
+	equipped(t)
+	opts := DefaultOptions()
+	opts.DisabledTools = []string{tools.ToolApplyPatch, tools.ToolSearchText}
+
+	a := New(&fakeChatter{}, opts)
+
+	names, _ := a.AdvertisedTools()
+	for _, name := range names {
+		if name == tools.ToolApplyPatch || name == tools.ToolSearchText {
+			t.Fatalf("AdvertisedTools() = %v, want the disabled tools withheld", names)
+		}
+	}
+	if len(names) != 3 {
+		t.Fatalf("AdvertisedTools() = %v, want the remaining three", names)
+	}
+}
+
+func TestDispatchRefusesAToolThatWasNotAdvertised(t *testing.T) {
+	isolate(t)
+	a := New(&fakeChatter{}, DefaultOptions())
+
+	// The schema was never sent, but a model can still invent the call. It must
+	// be turned down before it runs, and told not to try again.
+	got := a.dispatch(context.Background(), toolCall("search_text", map[string]any{"pattern": "x"}).ToolCalls[0])
+
+	if !strings.Contains(got, "unavailable in this project") {
+		t.Fatalf("dispatch() = %q, want a refusal naming the cause", got)
+	}
+	if !strings.Contains(got, "Do not retry") {
+		t.Fatalf("dispatch() = %q, want the model told not to retry", got)
+	}
+}
+
+func TestDispatchRefusesADisabledTool(t *testing.T) {
+	equipped(t)
+	opts := DefaultOptions()
+	opts.DisabledTools = []string{tools.ToolSearchText}
+	a := New(&fakeChatter{}, opts)
+
+	got := a.dispatch(context.Background(), toolCall("search_text", map[string]any{"pattern": "x"}).ToolCalls[0])
+
+	if !strings.Contains(got, "disabled by the operator") {
+		t.Fatalf("dispatch() = %q, want the refusal to distinguish a choice from a missing binary", got)
+	}
+}
+
+func TestResetKeepsTheAdvertisedPrompt(t *testing.T) {
+	isolate(t)
+	a := New(&fakeChatter{}, DefaultOptions())
+	seeded := a.messages[0].Content
+
+	if _, err := a.Step(context.Background(), "hi"); err != nil {
+		t.Fatal(err)
+	}
+	a.Reset()
+
+	if len(a.messages) != 1 || a.messages[0].Content != seeded {
+		t.Fatalf("Reset() prompt = %q, want the advertised set preserved", a.messages[0].Content)
+	}
+}
+
+func TestSystemPromptNumbersDirectivesContinuously(t *testing.T) {
+	got := systemPrompt([]string{tools.ToolViewSlice, tools.ToolApplyPatch})
+
+	for _, want := range []string{"1. NEVER guess", "2. Use 'view_slice'", "3. Use 'apply_patch'", "4. Report what changed"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("systemPrompt() = %q, missing %q", got, want)
+		}
+	}
+}
+
+func TestRunCommandIsWithheldUntilCommandsAreAllowed(t *testing.T) {
+	equipped(t)
+
+	// The default: nothing allowed, so the tool is not offered at all and its
+	// schema is not paid for on any request.
+	a := New(&fakeChatter{}, DefaultOptions())
+	names, _ := a.AdvertisedTools()
+	for _, name := range names {
+		if name == tools.ToolRunCommand {
+			t.Fatalf("AdvertisedTools() = %v, want run_command withheld by default", names)
+		}
+	}
+
+	got := a.dispatch(context.Background(), toolCall("run_command", map[string]any{"command": "go test"}).ToolCalls[0])
+	if !strings.Contains(got, "no commands are permitted") {
+		t.Fatalf("dispatch() = %q, want the reason stated", got)
+	}
+}
+
+func TestRunCommandSchemaNamesTheAllowedCommands(t *testing.T) {
+	equipped(t)
+	opts := DefaultOptions()
+	opts.Env.Allowed = tools.ParseAllowlist([]string{"go test", "go vet"})
+
+	a := New(&fakeChatter{}, opts)
+
+	var desc string
+	for _, schema := range a.schemas {
+		fn := schema.Function.(map[string]any)
+		if fn["name"] == tools.ToolRunCommand {
+			desc = fn["description"].(string)
+		}
+	}
+	// Without the allowlist in the description the model guesses, and every
+	// guess costs a turn to be refused.
+	for _, want := range []string{`"go test"`, `"go vet"`} {
+		if !strings.Contains(desc, want) {
+			t.Errorf("run_command description = %q, missing %q", desc, want)
+		}
+	}
+}
+
+func TestDescribeToolDoesNotMutateSharedSchemas(t *testing.T) {
+	equipped(t)
+	base := toolDefs[tools.ToolRunCommand].Function.(map[string]any)["description"].(string)
+
+	opts := DefaultOptions()
+	opts.Env.Allowed = tools.ParseAllowlist([]string{"make"})
+	New(&fakeChatter{}, opts)
+
+	// toolDefs is package state shared by every agent in the process; a second
+	// agent must not inherit the first one's allowlist.
+	if got := toolDefs[tools.ToolRunCommand].Function.(map[string]any)["description"].(string); got != base {
+		t.Fatalf("toolDefs description = %q, want the package copy untouched", got)
+	}
+}
+
+func TestDispatchAsksBeforeRunningACommand(t *testing.T) {
+	equipped(t)
+	var kind, preview string
+	opts := DefaultOptions()
+	opts.Env.Allowed = tools.ParseAllowlist([]string{"echo"})
+	opts.Approve = func(k, p string) bool {
+		kind, preview = k, p
+		return false
+	}
+	a := New(&fakeChatter{}, opts)
+
+	got := a.dispatch(context.Background(), toolCall("run_command", map[string]any{"command": "echo hi"}).ToolCalls[0])
+
+	if kind != "command" || preview != "echo hi" {
+		t.Fatalf("approver saw (%q, %q), want the command announced as such", kind, preview)
+	}
+	if !strings.Contains(got, "rejected by the operator") || !strings.Contains(got, "Do not retry") {
+		t.Fatalf("dispatch() = %q, want a refusal the model can act on", got)
+	}
+}
+
+func TestDispatchRunsAnApprovedCommand(t *testing.T) {
+	equipped(t)
+	opts := DefaultOptions()
+	opts.Env.Allowed = tools.ParseAllowlist([]string{"echo"})
+	a := New(&fakeChatter{}, opts) // nil Approve: proceed without asking
+
+	got := a.dispatch(context.Background(), toolCall("run_command", map[string]any{"command": "echo hi"}).ToolCalls[0])
+
+	if !strings.Contains(got, "exit status 0") {
+		t.Fatalf("dispatch() = %q, want the command to have run", got)
+	}
+}
+
+func TestDescribeToolLeavesOtherToolsAlone(t *testing.T) {
+	equipped(t)
+
+	got := describeTool(tools.ToolViewSlice, DefaultOptions().Env)
+
+	if got.Function.(map[string]any)["name"] != tools.ToolViewSlice {
+		t.Fatalf("describeTool(view_slice) = %+v, want the schema returned unchanged", got)
+	}
+}
+
+func TestDescribeToolSurvivesAMalformedSchema(t *testing.T) {
+	// toolDefs is package state; a schema whose Function is not a map must not
+	// panic the constructor.
+	original := toolDefs[tools.ToolRunCommand]
+	t.Cleanup(func() { toolDefs[tools.ToolRunCommand] = original })
+	toolDefs[tools.ToolRunCommand] = ollama.Tool{Type: "function", Function: "not a map"}
+
+	got := describeTool(tools.ToolRunCommand, DefaultOptions().Env)
+
+	if got.Function != "not a map" {
+		t.Fatalf("describeTool() = %+v, want the schema passed through untouched", got)
+	}
+}
+
+func TestDispatchReportsARunCommandFailure(t *testing.T) {
+	equipped(t)
+	opts := DefaultOptions()
+	opts.Env.Allowed = tools.ParseAllowlist([]string{"echo"})
+	a := New(&fakeChatter{}, opts)
+
+	// An empty command is a mistake the model can correct, so it comes back as
+	// readable text rather than as a Go error.
+	got := a.dispatch(context.Background(), toolCall("run_command", map[string]any{"command": ""}).ToolCalls[0])
+
+	if !strings.Contains(got, "No command given") {
+		t.Fatalf("dispatch() = %q, want the empty command explained", got)
 	}
 }

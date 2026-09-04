@@ -3,6 +3,7 @@ package tools
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -43,7 +44,7 @@ const goodDiff = `--- a/target.txt
 func TestApplyPatchAppliesUnifiedDiff(t *testing.T) {
 	gitRepo(t)
 
-	got, err := ApplyPatch(goodDiff)
+	got, err := defaultEnv(t).ApplyPatch(goodDiff)
 	if err != nil {
 		t.Fatalf("ApplyPatch() error = %v", err)
 	}
@@ -63,7 +64,7 @@ func TestApplyPatchRejectsNonMatchingDiff(t *testing.T) {
 	gitRepo(t)
 
 	stale := strings.Replace(goodDiff, " alpha", " ALPHA", 1)
-	got, err := ApplyPatch(stale)
+	got, err := defaultEnv(t).ApplyPatch(stale)
 	if err != nil {
 		t.Fatalf("ApplyPatch() error = %v, want the failure reported as content", err)
 	}
@@ -79,7 +80,7 @@ func TestApplyPatchRejectsNonMatchingDiff(t *testing.T) {
 func TestApplyPatchRejectsMalformedDiff(t *testing.T) {
 	gitRepo(t)
 
-	got, err := ApplyPatch("this is not a diff at all\n")
+	got, err := defaultEnv(t).ApplyPatch("this is not a diff at all\n")
 	if err != nil {
 		t.Fatalf("ApplyPatch() error = %v", err)
 	}
@@ -101,7 +102,7 @@ func TestApplyPatchReportsApplyFailureAfterSuccessfulCheck(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
 
-	got, err := ApplyPatch(goodDiff)
+	got, err := defaultEnv(t).ApplyPatch(goodDiff)
 	if err != nil {
 		t.Fatalf("ApplyPatch() error = %v", err)
 	}
@@ -114,7 +115,7 @@ func TestApplyPatchReportsMissingGit(t *testing.T) {
 	workdir(t)
 	shimDir(t, nil)
 
-	_, err := ApplyPatch(goodDiff)
+	_, err := defaultEnv(t).ApplyPatch(goodDiff)
 	if err == nil {
 		t.Fatal("ApplyPatch() = nil error, want a missing-git error")
 	}
@@ -123,5 +124,61 @@ func TestApplyPatchReportsMissingGit(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("ApplyPatch() error = %v, want it to mention %q", err, want)
 		}
+	}
+}
+
+func TestApplyPatchRefusesTargetsOutsideTheProject(t *testing.T) {
+	dir := t.TempDir()
+	project := filepath.Join(dir, "project")
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(project)
+	// git is never reached: the path check runs first, so this needs no repo.
+	shimDir(t, nil)
+
+	escapes := []string{
+		"--- /dev/null\n+++ b/../../escaped.txt\n@@ -0,0 +1 @@\n+pwned\n",
+		"--- a/../outside.go\n+++ b/../outside.go\n@@ -1 +1 @@\n-a\n+b\n",
+	}
+	for _, diff := range escapes {
+		got, err := defaultEnv(t).ApplyPatch(diff)
+		if err != nil {
+			t.Fatalf("ApplyPatch() error = %v, want the refusal reported as content", err)
+		}
+		if !strings.Contains(got, "Patch rejected") || !strings.Contains(got, "outside the project") {
+			t.Fatalf("ApplyPatch() = %q, want a refusal naming the boundary", got)
+		}
+		if !strings.Contains(got, "Do not retry") {
+			t.Fatalf("ApplyPatch() = %q, want the model told not to retry", got)
+		}
+	}
+}
+
+func TestPatchTargetsReadsBothHeaderForms(t *testing.T) {
+	diff := "diff --git a/x.go b/x.go\n" +
+		"--- a/x.go\t2026-01-01 00:00:00\n" +
+		"+++ b/x.go\n" +
+		"@@ -1 +1 @@\n-a\n+b\n" +
+		"--- /dev/null\n" +
+		"+++ b/new.go\n" +
+		"--- plain.go\n" +
+		"+++ \n"
+
+	got := patchTargets(diff)
+	want := []string{"x.go", "x.go", "new.go", "plain.go"}
+	if len(got) != len(want) {
+		t.Fatalf("patchTargets() = %q, want %q", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("patchTargets() = %q, want %q", got, want)
+		}
+	}
+}
+
+func TestPatchTargetsIgnoresANonDiff(t *testing.T) {
+	if got := patchTargets("this is prose, not a diff\n"); got != nil {
+		t.Fatalf("patchTargets() = %q, want nothing recognised", got)
 	}
 }

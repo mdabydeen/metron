@@ -2,6 +2,7 @@ package tools
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -15,7 +16,7 @@ printf '\n./main.go:12:hit one\n./loop.go:4:hit two\n\n'
 `,
 	})
 
-	got, err := SearchText("hit", 10, 2)
+	got, err := testEnv(t, Budgets{SearchMaxMatches: 10, SearchMaxPerFile: 2}).SearchText("hit")
 	if err != nil {
 		t.Fatalf("SearchText() error = %v", err)
 	}
@@ -41,7 +42,7 @@ func TestSearchTextEnforcesTheOverallBudget(t *testing.T) {
 	// their allowance can still blow the overall budget. SearchText trims.
 	shimDir(t, map[string]string{"rg": `for i in 1 2 3 4 5 6; do echo "./f$i.go:1:hit"; done` + "\n"})
 
-	got, err := SearchText("hit", 3, 2)
+	got, err := testEnv(t, Budgets{SearchMaxMatches: 3, SearchMaxPerFile: 2}).SearchText("hit")
 	if err != nil {
 		t.Fatalf("SearchText() error = %v", err)
 	}
@@ -58,7 +59,7 @@ func TestSearchTextKeepsResultsWithinBudget(t *testing.T) {
 	workdir(t)
 	shimDir(t, map[string]string{"rg": "echo './a.go:1:hit'\necho './b.go:2:hit'\n"})
 
-	got, err := SearchText("hit", 10, 2)
+	got, err := testEnv(t, Budgets{SearchMaxMatches: 10, SearchMaxPerFile: 2}).SearchText("hit")
 	if err != nil {
 		t.Fatalf("SearchText() error = %v", err)
 	}
@@ -73,7 +74,7 @@ func TestSearchTextTreatsEmptyOutputAsNoMatches(t *testing.T) {
 	// filtered out); that is a miss, not an empty answer.
 	shimDir(t, map[string]string{"rg": "exit 0\n"})
 
-	got, err := SearchText("hit", 10, 2)
+	got, err := testEnv(t, Budgets{SearchMaxMatches: 10, SearchMaxPerFile: 2}).SearchText("hit")
 	if err != nil {
 		t.Fatalf("SearchText() error = %v", err)
 	}
@@ -86,7 +87,7 @@ func TestSearchTextNoMatches(t *testing.T) {
 	workdir(t)
 	shimDir(t, map[string]string{"rg": "exit 1\n"})
 
-	got, err := SearchText("nothing", 10, 2)
+	got, err := testEnv(t, Budgets{SearchMaxMatches: 10, SearchMaxPerFile: 2}).SearchText("nothing")
 	if err != nil {
 		t.Fatalf("SearchText() error = %v", err)
 	}
@@ -99,7 +100,7 @@ func TestSearchTextReportsRipgrepFailure(t *testing.T) {
 	workdir(t)
 	shimDir(t, map[string]string{"rg": "echo 'regex parse error' >&2\nexit 2\n"})
 
-	_, err := SearchText("(", 10, 2)
+	_, err := testEnv(t, Budgets{SearchMaxMatches: 10, SearchMaxPerFile: 2}).SearchText("(")
 	if err == nil || !strings.Contains(err.Error(), "ripgrep error") {
 		t.Fatalf("SearchText() error = %v, want a ripgrep error", err)
 	}
@@ -112,7 +113,7 @@ func TestSearchTextReportsMissingBinary(t *testing.T) {
 	workdir(t)
 	shimDir(t, nil)
 
-	_, err := SearchText("anything", 10, 2)
+	_, err := testEnv(t, Budgets{SearchMaxMatches: 10, SearchMaxPerFile: 2}).SearchText("anything")
 	if err == nil {
 		t.Fatal("SearchText() = nil error, want an error when rg is not on PATH")
 	}
@@ -122,5 +123,44 @@ func TestSearchTextReportsMissingBinary(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("SearchText() error = %v, want it to mention %q", err, want)
 		}
+	}
+}
+
+func TestSearchTextPassesADashPatternAsAPattern(t *testing.T) {
+	workdir(t)
+	// Echo the arguments so the argv metron builds is observable.
+	shimDir(t, map[string]string{"rg": "echo \"$@\"\n"})
+
+	// Without the -- separator, ripgrep parses this as the --files flag: it
+	// would list every file in the repository and silently ignore the match
+	// budget, which is the opposite of what search_text is for.
+	got, err := testEnv(t, Budgets{SearchMaxMatches: 10, SearchMaxPerFile: 2}).SearchText("--files")
+	if err != nil {
+		t.Fatalf("SearchText() error = %v", err)
+	}
+	if !strings.Contains(got, "-- --files") {
+		t.Fatalf("SearchText() invoked rg with %q, want the pattern after a -- separator", got)
+	}
+}
+
+func TestSearchTextRunsAtTheProjectRoot(t *testing.T) {
+	dir := workdir(t)
+	sub := filepath.Join(dir, "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	shimDir(t, map[string]string{"rg": "pwd\n"})
+
+	env := testEnv(t, Budgets{SearchMaxMatches: 10, SearchMaxPerFile: 2})
+	t.Chdir(sub)
+
+	// The process working directory has moved, but the tool still searches the
+	// project it was rooted at.
+	got, err := env.SearchText("anything")
+	if err != nil {
+		t.Fatalf("SearchText() error = %v", err)
+	}
+	if strings.TrimSpace(got) != env.Root {
+		t.Fatalf("SearchText() ran in %q, want the project root %q", strings.TrimSpace(got), env.Root)
 	}
 }

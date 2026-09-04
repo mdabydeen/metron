@@ -21,7 +21,7 @@ func TestEnsureTagsSkipsWhenTagsFileExists(t *testing.T) {
 		"ctags": "echo ran > " + dir + "/ctags-ran\n",
 	})
 
-	if err := EnsureTags(); err != nil {
+	if err := defaultEnv(t).EnsureTags(); err != nil {
 		t.Fatalf("EnsureTags() = %v, want nil", err)
 	}
 	if _, err := os.Stat(dir + "/ctags-ran"); err == nil {
@@ -48,7 +48,7 @@ printf 'Sym\tmain.go\t/^Sym$/;"\tkind:func\tline:3\n' > "$out"
 `,
 	})
 
-	if err := EnsureTags(); err != nil {
+	if err := defaultEnv(t).EnsureTags(); err != nil {
 		t.Fatalf("EnsureTags() = %v, want nil", err)
 	}
 	b, err := os.ReadFile(".tags")
@@ -64,7 +64,7 @@ func TestEnsureTagsReturnsErrorWhenCtagsUnavailable(t *testing.T) {
 	workdir(t)
 	shimDir(t, nil)
 
-	err := EnsureTags()
+	err := defaultEnv(t).EnsureTags()
 	if err == nil {
 		t.Fatal("EnsureTags() = nil, want error when ctags is not on PATH")
 	}
@@ -83,7 +83,7 @@ func TestEnsureTagsExplainsIncompatibleCtags(t *testing.T) {
 		"ctags": "echo 'ctags: illegal option -- -' >&2\nexit 1\n",
 	})
 
-	err := EnsureTags()
+	err := defaultEnv(t).EnsureTags()
 	if err == nil {
 		t.Fatal("EnsureTags() = nil, want an error from an incompatible ctags")
 	}
@@ -99,7 +99,7 @@ func TestFindSymbolReportsCtagsFailure(t *testing.T) {
 	workdir(t)
 	shimDir(t, nil)
 
-	_, err := FindSymbol("Agent")
+	_, err := defaultEnv(t).FindSymbol("Agent")
 	if err == nil || !strings.Contains(err.Error(), "failed generating ctags") {
 		t.Fatalf("FindSymbol() error = %v, want it to wrap the ctags failure", err)
 	}
@@ -109,7 +109,7 @@ func TestFindSymbolMatchesExactSymbolAcrossFiles(t *testing.T) {
 	workdir(t)
 	writeFile(t, ".tags", sampleTags)
 
-	got, err := FindSymbol("Agent")
+	got, err := defaultEnv(t).FindSymbol("Agent")
 	if err != nil {
 		t.Fatalf("FindSymbol() error = %v", err)
 	}
@@ -124,7 +124,7 @@ func TestFindSymbolDefaultsMissingKindAndLineFields(t *testing.T) {
 	workdir(t)
 	writeFile(t, ".tags", sampleTags)
 
-	got, err := FindSymbol("Bare")
+	got, err := defaultEnv(t).FindSymbol("Bare")
 	if err != nil {
 		t.Fatalf("FindSymbol() error = %v", err)
 	}
@@ -138,7 +138,7 @@ func TestFindSymbolIgnoresHeaderAndMalformedLines(t *testing.T) {
 	writeFile(t, ".tags", sampleTags)
 
 	for _, sym := range []string{"!_TAG_FILE_FORMAT", "Short"} {
-		got, err := FindSymbol(sym)
+		got, err := defaultEnv(t).FindSymbol(sym)
 		if err != nil {
 			t.Fatalf("FindSymbol(%q) error = %v", sym, err)
 		}
@@ -152,7 +152,7 @@ func TestFindSymbolNotFound(t *testing.T) {
 	workdir(t)
 	writeFile(t, ".tags", sampleTags)
 
-	got, err := FindSymbol("Nonexistent")
+	got, err := defaultEnv(t).FindSymbol("Nonexistent")
 	if err != nil {
 		t.Fatalf("FindSymbol() error = %v", err)
 	}
@@ -172,7 +172,7 @@ func TestFindSymbolReturnsErrorWhenTagsFileUnreadable(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(".tags", 0o644) })
 
-	if _, err := FindSymbol("Agent"); err == nil {
+	if _, err := defaultEnv(t).FindSymbol("Agent"); err == nil {
 		t.Fatal("FindSymbol() = nil error, want a read failure")
 	}
 }

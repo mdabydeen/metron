@@ -23,9 +23,10 @@ import (
 	"testing"
 	"time"
 
-	"metron/internal/agent"
-	"metron/internal/config"
-	"metron/internal/ollama"
+	"github.com/mdabydeen/metron/internal/agent"
+	"github.com/mdabydeen/metron/internal/config"
+	"github.com/mdabydeen/metron/internal/ollama"
+	"github.com/mdabydeen/metron/internal/tools"
 )
 
 // liveModel returns a model on the local server that advertises tool support.
@@ -127,11 +128,13 @@ func liveSetup(t *testing.T) (*countingChatter, *agent.Agent, config.Config) {
 		MaxTurns:           cfg.MaxTurns,
 		CompactThreshold:   cfg.CompactThreshold,
 		MaxHistoryMessages: cfg.MaxHistoryMessages,
-		MaxSliceLines:      cfg.MaxSliceLines,
-		MaxLineChars:       cfg.MaxLineChars,
-		SearchMaxMatches:   cfg.SearchMaxMatches,
-		SearchMaxPerFile:   cfg.SearchMaxPerFile,
-		ListMaxEntries:     cfg.ListMaxEntries,
+		Env: tools.NewEnv(tools.Budgets{
+			MaxSliceLines:    cfg.MaxSliceLines,
+			MaxLineChars:     cfg.MaxLineChars,
+			SearchMaxMatches: cfg.SearchMaxMatches,
+			SearchMaxPerFile: cfg.SearchMaxPerFile,
+			ListMaxEntries:   cfg.ListMaxEntries,
+		}),
 	}), cfg
 }
 

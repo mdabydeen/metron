@@ -13,10 +13,10 @@ import (
 	"strings"
 	"time"
 
-	"metron/internal/agent"
-	"metron/internal/config"
-	"metron/internal/ollama"
-	"metron/internal/tools"
+	"github.com/mdabydeen/metron/internal/agent"
+	"github.com/mdabydeen/metron/internal/config"
+	"github.com/mdabydeen/metron/internal/ollama"
+	"github.com/mdabydeen/metron/internal/tools"
 )
 
 const helpText = `Commands:
@@ -39,6 +39,7 @@ type stepper interface {
 	Reset()
 	HistorySize() (messages, bytes int)
 	LastUsage() (ollama.Usage, int)
+	AdvertisedTools() (names []string, schemaBytes int)
 }
 
 // exit is indirected so tests can exercise main without killing the process.
@@ -121,15 +122,25 @@ func runMain(args []string, in io.Reader, out, errOut io.Writer) int {
 	scanner := bufio.NewScanner(in)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxInputLine)
 
+	// One Env, shared by the agent and by /tags, so both agree on which
+	// project they are pointed at.
+	env := tools.NewEnv(tools.Budgets{
+		MaxSliceLines:    cfg.MaxSliceLines,
+		MaxLineChars:     cfg.MaxLineChars,
+		SearchMaxMatches: cfg.SearchMaxMatches,
+		SearchMaxPerFile: cfg.SearchMaxPerFile,
+		ListMaxEntries:   cfg.ListMaxEntries,
+
+		CommandTimeout:        time.Duration(cfg.CommandTimeoutSeconds) * time.Second,
+		MaxCommandOutputBytes: cfg.MaxCommandOutputBytes,
+	})
+	env.Allowed = tools.ParseAllowlist(cfg.AllowedCommands)
 	opts := agent.Options{
 		MaxTurns:           cfg.MaxTurns,
 		CompactThreshold:   cfg.CompactThreshold,
 		MaxHistoryMessages: cfg.MaxHistoryMessages,
-		MaxSliceLines:      cfg.MaxSliceLines,
-		MaxLineChars:       cfg.MaxLineChars,
-		SearchMaxMatches:   cfg.SearchMaxMatches,
-		SearchMaxPerFile:   cfg.SearchMaxPerFile,
-		ListMaxEntries:     cfg.ListMaxEntries,
+		Env:                env,
+		DisabledTools:      cfg.DisabledTools,
 		Progress:           out,
 	}
 	autoApprove := cfg.AutoApprovePatches || f.yes
@@ -139,25 +150,25 @@ func runMain(args []string, in io.Reader, out, errOut io.Writer) int {
 	case f.prompt != "":
 		// Nobody is at the keyboard to answer, so fail closed rather than
 		// block forever or edit the tree unattended.
-		opts.Approve = func(string) bool { return false }
+		opts.Approve = func(string, string) bool { return false }
 		opts.Progress = errOut
 	default:
-		opts.Approve = func(diff string) bool { return approve(out, scanner, diff) }
+		opts.Approve = func(kind, preview string) bool { return approve(out, scanner, kind, preview) }
 	}
 	bot := agent.New(client, opts)
 
 	if f.prompt != "" {
-		return oneShot(context.Background(), out, errOut, bot, f.prompt)
+		return oneShot(context.Background(), out, errOut, env, bot, f.prompt)
 	}
 
-	run(context.Background(), scanner, out, cfg, path, bot, streamed)
+	run(context.Background(), scanner, out, cfg, path, env, bot, streamed)
 	return 0
 }
 
 // oneShot runs a single request and prints only the answer on stdout, so
 // `metron -p ... 2>/dev/null` is pipeable. Progress and warnings go to stderr.
-func oneShot(ctx context.Context, out, errOut io.Writer, bot stepper, prompt string) int {
-	for _, w := range tools.Preflight() {
+func oneShot(ctx context.Context, out, errOut io.Writer, env tools.Env, bot stepper, prompt string) int {
+	for _, w := range env.Preflight() {
 		fmt.Fprintf(errOut, "warning: %s\n", w)
 	}
 	resp, err := step(ctx, bot, prompt)
@@ -173,21 +184,34 @@ func oneShot(ctx context.Context, out, errOut io.Writer, bot stepper, prompt str
 // default of 64KB silently ends the session on anything larger.
 const maxInputLine = 1 << 20
 
-// approve shows the model's diff and waits for a yes. It reads from the REPL's
-// own scanner, so a queued line is consumed here rather than being mistaken for
-// the next request. EOF answers no: an operator who is gone has not consented.
-func approve(out io.Writer, scanner *bufio.Scanner, diff string) bool {
-	fmt.Fprintf(out, "\n\033[1mProposed patch:\033[0m\n%s\n", strings.TrimRight(diff, "\n"))
-	fmt.Fprint(out, "\033[1;33mApply this patch? [y/N] \033[0m")
+// approvalWording is what the prompt says for each kind of effect. A command is
+// not a patch: the operator is being asked to let something execute, not to
+// accept an edit, and the prompt should not blur the two.
+var approvalWording = map[string]struct{ heading, question, refusal string }{
+	"patch":   {"Proposed patch", "Apply this patch?", "Patch not applied."},
+	"command": {"Proposed command", "Run this command?", "Command not run."},
+}
+
+// approve shows what the model wants to do and waits for a yes. It reads from
+// the REPL's own scanner, so a queued line is consumed here rather than being
+// mistaken for the next request. EOF answers no: an operator who is gone has
+// not consented.
+func approve(out io.Writer, scanner *bufio.Scanner, kind, preview string) bool {
+	w, ok := approvalWording[kind]
+	if !ok {
+		w = struct{ heading, question, refusal string }{"Proposed action", "Allow this?", "Not allowed."}
+	}
+	fmt.Fprintf(out, "\n\033[1m%s:\033[0m\n%s\n", w.heading, strings.TrimRight(preview, "\n"))
+	fmt.Fprintf(out, "\033[1;33m%s [y/N] \033[0m", w.question)
 	if !scanner.Scan() {
-		fmt.Fprintln(out, "\nNo input; patch not applied.")
+		fmt.Fprintf(out, "\nNo input; %s\n", strings.ToLower(w.refusal))
 		return false
 	}
 	switch strings.ToLower(strings.TrimSpace(scanner.Text())) {
 	case "y", "yes":
 		return true
 	default:
-		fmt.Fprintln(out, "Patch not applied.")
+		fmt.Fprintln(out, w.refusal)
 		return false
 	}
 }
@@ -196,13 +220,13 @@ func approve(out io.Writer, scanner *bufio.Scanner, diff string) bool {
 // streamed tells run that replies already reached out as they arrived, so it
 // must not print them a second time. It is a parameter rather than a read of
 // cfg.Stream because the caller is what actually wires the client's sink.
-func run(ctx context.Context, scanner *bufio.Scanner, out io.Writer, cfg config.Config, cfgPath string, bot stepper, streamed bool) {
+func run(ctx context.Context, scanner *bufio.Scanner, out io.Writer, cfg config.Config, cfgPath string, env tools.Env, bot stepper, streamed bool) {
 	fmt.Fprintf(out, "\033[1;36m=== metron (model: %s) ===\033[0m\n", cfg.Model)
 	fmt.Fprintln(out, "Context-disciplined terminal coder. /help for commands, /exit to quit.")
 	if cfgPath != "" {
 		fmt.Fprintf(out, "config: %s\n", cfgPath)
 	}
-	for _, w := range tools.Preflight() {
+	for _, w := range env.Preflight() {
 		fmt.Fprintf(out, "\033[33mwarning: %s\033[0m\n", w)
 	}
 
@@ -215,7 +239,7 @@ func run(ctx context.Context, scanner *bufio.Scanner, out io.Writer, cfg config.
 		if input == "" {
 			continue
 		}
-		if done := command(out, input, cfg, cfgPath, bot); done {
+		if done := command(out, input, cfg, cfgPath, env, bot); done {
 			return
 		}
 		if strings.HasPrefix(input, "/") {
@@ -298,14 +322,14 @@ func step(ctx context.Context, bot stepper, input string) (string, error) {
 
 // command handles the REPL's own directives. It reports whether the REPL
 // should stop; non-command input is left for the model.
-func command(out io.Writer, input string, cfg config.Config, cfgPath string, bot stepper) (quit bool) {
+func command(out io.Writer, input string, cfg config.Config, cfgPath string, env tools.Env, bot stepper) (quit bool) {
 	switch input {
 	case "exit", "quit", "/exit", "/quit":
 		return true
 	case "/help":
 		fmt.Fprintln(out, helpText)
 	case "/config":
-		showConfig(out, cfg, cfgPath)
+		showConfig(out, cfg, cfgPath, bot)
 	case "/reset":
 		bot.Reset()
 		fmt.Fprintln(out, "Conversation history cleared.")
@@ -314,7 +338,7 @@ func command(out io.Writer, input string, cfg config.Config, cfgPath string, bot
 		fmt.Fprintf(out, "history: %d messages, ~%d bytes (budget: %d messages; /reset clears it)\n",
 			msgs, bytes, cfg.MaxHistoryMessages)
 	case "/tags":
-		if err := tools.RebuildTags(); err != nil {
+		if err := env.RebuildTags(); err != nil {
 			fmt.Fprintf(out, "\033[31mError: %v\033[0m\n", err)
 			break
 		}
@@ -327,14 +351,31 @@ func command(out io.Writer, input string, cfg config.Config, cfgPath string, bot
 	return false
 }
 
+// bytesPerToken is a rough conversion for reporting schema cost. Tokenisation
+// is model-specific and metron does not ship a tokeniser, so the figure is
+// labelled as an estimate rather than presented as a count.
+const bytesPerToken = 4
+
 // showConfig prints the effective settings, so an operator can tell at a glance
 // which file (if any) is in play and what the budgets actually are.
-func showConfig(out io.Writer, cfg config.Config, cfgPath string) {
+//
+// The advertised tool set is part of that picture: their schemas are sent with
+// every single request, so they are a standing cost, and which tools are
+// present depends on what is installed.
+func showConfig(out io.Writer, cfg config.Config, cfgPath string, bot stepper) {
 	source := cfgPath
 	if source == "" {
 		source = "built-in defaults (no config file found)"
 	}
 	fmt.Fprintf(out, "source: %s\n", source)
+
+	names, schemaBytes := bot.AdvertisedTools()
+	if len(names) == 0 {
+		fmt.Fprintln(out, "tools: none advertised")
+	} else {
+		fmt.Fprintf(out, "tools: %s (%d schema bytes, ~%d tokens per request)\n",
+			strings.Join(names, ", "), schemaBytes, schemaBytes/bytesPerToken)
+	}
 	enc := json.NewEncoder(out)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(cfg); err != nil {

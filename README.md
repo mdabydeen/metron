@@ -1,5 +1,9 @@
 # metron
 
+[![CI](https://github.com/mdabydeen/metron/actions/workflows/ci.yml/badge.svg)](https://github.com/mdabydeen/metron/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/mdabydeen/metron.svg)](https://pkg.go.dev/github.com/mdabydeen/metron)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+
 A minimal, terminal-based coding agent that talks to a **local** [Ollama](https://ollama.com)
 model. Its one defining constraint is **token discipline**: the model never reads a whole
 file. Every look at your code goes through a narrow, budgeted tool, and large tool output is
@@ -63,20 +67,36 @@ The test suite needs none of these — see [Testing](#testing).
 ## Install
 
 ```bash
+go install github.com/mdabydeen/metron/cmd/metron@latest
+```
+
+Or build from a clone:
+
+```bash
 make build            # -> bin/metron
 make install          # build, then sudo cp to /usr/local/bin
-go run main.go        # run without building
+go run ./cmd/metron   # run without building
 ```
+
+`go install` does not stamp a version, so `metron --version` reports `dev` for those builds.
+Released binaries and `make build` both carry the real one.
 
 ## Usage
 
-Run metron **from the root of the repository you want it to work on** — every tool resolves
-paths relative to the process working directory, and the ctags index is written to `./.tags`.
+Run metron anywhere inside the repository you want it to work on. It finds the enclosing
+git work tree and treats that as the project: tools resolve paths against it, and the ctags
+index is written to `<project>/.tags` regardless of which subdirectory you started in.
+Outside a repository, the working directory is the project.
 
 ```bash
 cd ~/code/my-project
 metron
 ```
+
+**The project directory is also a boundary.** Every path a tool touches is resolved and
+refused if it lands outside — `view_slice` will not read `~/.ssh/id_rsa`, and `apply_patch`
+will not write to `../..`. Symlinks are followed before the check, so a link out of the tree
+does not get around it. See [SECURITY.md](SECURITY.md).
 
 ### One-shot mode
 
@@ -175,6 +195,10 @@ cp metron.example.json .metron.json
 | `search_max_matches` | `10` | total `search_text` results |
 | `search_max_per_file` | `2` | `search_text` results per file |
 | `list_max_entries` | `60` | paths `list_files` will return |
+| `disabled_tools` | `[]` | tool names to withhold from the model entirely |
+| `allowed_commands` | `[]` | argv prefixes `run_command` may execute; empty withdraws the tool |
+| `command_timeout_seconds` | `120` | wall clock one `run_command` gets |
+| `max_command_output_bytes` | `4000` | combined output `run_command` returns |
 
 A file that exists but cannot be read or parsed is a startup error, not a silent fallback —
 including unknown keys, so a typo like `"modle"` is reported instead of ignored. Values are
@@ -210,10 +234,35 @@ OLLAMA_MODEL=gemma4:12b-mlx metron
 `/config` inside the REPL prints the result of all of this, so you never have to guess which
 layer won.
 
+### Which tools get offered
+
+metron only advertises tools that can actually run. A missing ripgrep withdraws `list_files`
+and `search_text`; a BSD `ctags` withdraws `find_symbol`; running outside a git repository
+withdraws `apply_patch`; an empty `allowed_commands` withdraws `run_command`.
+`disabled_tools` withdraws whatever you name, and an unknown name there is a startup error
+rather than a silent no-op.
+
+This is a budget, not just tidiness. **Tool schemas are sent with every single request**, so
+an unusable tool is a tax on every turn — and naming it in the system prompt invites the
+model to call it and waste a turn finding out. `/config` reports both the set and its cost:
+
+```
+tools: list_files, find_symbol, search_text, view_slice, apply_patch (1150 schema bytes, ~287 tokens per request)
+```
+
+On a Mac with no ripgrep and the system ctags, that same line reads:
+
+```
+tools: view_slice, apply_patch (493 schema bytes, ~123 tokens per request)
+```
+
+If the model calls a tool that was not advertised, the call is refused before it runs, with a
+message telling it not to retry.
+
 ## The tools
 
-Five tools, each a standalone function in `internal/tools` with no shared state. This is the
-complete surface the model has for touching your code.
+Six tools, all methods on the `tools.Env` that holds the project root, the budgets and the
+command allowlist. This is the complete surface the model has for touching your code.
 
 ### `list_files(pattern)`
 
@@ -260,14 +309,39 @@ stdin. Patch failures are returned as *text*, not Go errors, so the model sees g
 complaint and can correct the diff itself. Only a missing `git` binary surfaces as a real
 error, since that is an environment fault rather than a bad patch.
 
+### `run_command(command)`
+
+Runs one command in the project and returns its exit status and output, so the model can
+check its own work instead of asserting it. **Off by default** — with no `allowed_commands`
+set, the tool is not offered at all.
+
+There is no shell. The command is split on whitespace and executed directly, so `;`, `&&`,
+`|`, redirection and globs are never interpreted; they arrive as literal arguments and the
+program rejects them. The allowlist matches whole argv tokens, so `"go test"` permits
+`go test ./...` and refuses `go tool`, `gotcha test` and `env go test`.
+
+Each run is asked about at the prompt, killed with its whole process group at
+`command_timeout_seconds`, and clipped to `max_command_output_bytes` — keeping the head and
+the tail, since that is where a compiler puts the offending file and the summary.
+
+A non-zero exit is data, not an error: "the tests still fail" is exactly what the model
+asked to find out.
+
+```json
+{ "allowed_commands": ["go test", "go build", "go vet"] }
+```
+
+Choose these entries with the care you would give a sudoers file. `"go"` permits
+`go run ./anything`; `"make"` permits whatever the Makefile does. See [SECURITY.md](SECURITY.md).
+
 ## Architecture
 
 ```
-main.go              REPL and commands. No conversation state lives here.
+cmd/metron/main.go   REPL and commands. No conversation state lives here.
 internal/config      Settings: defaults, JSON file, environment, validation.
 internal/ollama      HTTP client for Ollama's /api/chat, plus the shared wire types.
 internal/agent       The agent loop, the system prompt, tool schemas, compaction.
-internal/tools       The five tools plus the startup dependency check.
+internal/tools       The six tools, the project confinement, the dependency check.
 ```
 
 Seams are interfaces, so each layer can be driven in isolation: `agent.New` takes a `Chatter`
@@ -422,3 +496,20 @@ and not to retry, it tried once, fell back to `view_slice`, and finished the job
 - Trimming history drops the oldest exchanges silently; the model is not told that earlier
   context is gone.
 - Conversation history is lost when you exit.
+- The agent cannot run anything, so it cannot check whether its own edit worked.
+
+These are being addressed. See [CHANGELOG.md](CHANGELOG.md) for what has landed.
+
+## Contributing
+
+Bug reports and pull requests are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) first:
+metron is small on purpose, and the constraints there are what a PR is judged against.
+Participation is governed by the [Code of Conduct](CODE_OF_CONDUCT.md).
+
+Security issues go through [SECURITY.md](SECURITY.md), not the public tracker. That file
+also documents what metron actually does to your working tree, which is worth reading
+before you point it at a repository.
+
+## License
+
+[Apache-2.0](LICENSE). Copyright 2026 Mike Dabydeen.
