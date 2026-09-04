@@ -89,7 +89,7 @@ jobs:
       # Version deliberately unpinned: the action's default tracks a v2 release
       # that matches the v2 schema in .golangci.yml. Pin it once a known-good
       # version has actually been run against this repo.
-      - uses: golangci/golangci-lint-action@v8
+      - uses: golangci/golangci-lint-action@v9
         with:
           # Pinned, and kept in step with GOLANGCI_VERSION in the Makefile. The
           # action installs the latest release by default, so a new golangci-lint
