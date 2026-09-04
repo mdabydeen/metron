@@ -34,6 +34,15 @@ type ChatResponse struct {
 	EvalCount       int `json:"eval_count"`
 }
 
+// Limits on what a server may send. metron's premise is a bounded context
+// window; a reply that cannot be bounded defeats it.
+const (
+	maxResponseBytes = 32 << 20
+	maxContentBytes  = 8 << 20
+	maxStreamCalls   = 64
+	maxErrorBytes    = 8 << 10
+)
+
 type Client struct {
 	endpoint string
 	model    string
@@ -93,16 +102,19 @@ func (c *Client) Chat(ctx context.Context, messages []llm.Message, tools []llm.T
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBytes))
 		return nil, fmt.Errorf("ollama error (status %d): %s", resp.StatusCode, string(b))
 	}
 
+	// Bounded for the same reason as the OpenAI client: the idle watchdog resets
+	// on every chunk, so a steady stream is never idle and never cancelled.
+	body := io.LimitReader(resp.Body, maxResponseBytes)
 	if c.opts.Stream {
-		return c.readStream(resp.Body, watchdog)
+		return c.readStream(body, watchdog)
 	}
 
 	var chatResp ChatResponse
-	if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
+	if err := json.NewDecoder(body).Decode(&chatResp); err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
 	return replyFrom(chatResp, chatResp.Message), nil
@@ -126,10 +138,16 @@ func (c *Client) readStream(body io.Reader, watchdog *time.Timer) (*llm.Reply, e
 		watchdog.Reset(c.opts.Timeout)
 
 		if chunk.Message.Content != "" {
+			if assembled.content.Len()+len(chunk.Message.Content) > maxContentBytes {
+				return nil, fmt.Errorf("reply exceeded %d bytes", maxContentBytes)
+			}
 			assembled.content.WriteString(chunk.Message.Content)
 			if c.opts.Sink != nil {
 				fmt.Fprint(c.opts.Sink, chunk.Message.Content)
 			}
+		}
+		if len(assembled.toolCalls)+len(chunk.Message.ToolCalls) > maxStreamCalls {
+			return nil, fmt.Errorf("reply carried more than %d tool calls", maxStreamCalls)
 		}
 		assembled.toolCalls = append(assembled.toolCalls, chunk.Message.ToolCalls...)
 		if chunk.Message.Role != "" {

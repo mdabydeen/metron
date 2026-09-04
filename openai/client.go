@@ -136,16 +136,21 @@ func (c *Client) Chat(ctx context.Context, messages []llm.Message, tools []llm.T
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBytes))
 		return nil, fmt.Errorf("openai error (status %d): %s", resp.StatusCode, string(b))
 	}
 
+	// Bounded before anything reads it. The idle watchdog resets on every chunk,
+	// so a server that streams steadily is never idle and never cancelled --
+	// which without a size limit is an out-of-memory condition a remote endpoint
+	// can trigger at will.
+	bounded := io.LimitReader(resp.Body, maxResponseBytes)
 	if c.opts.Stream {
-		return c.readStream(resp.Body, watchdog)
+		return c.readStream(bounded, watchdog)
 	}
 
 	var parsed chatResponse
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+	if err := json.NewDecoder(bounded).Decode(&parsed); err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
 	if parsed.Error != nil {
@@ -161,6 +166,16 @@ func (c *Client) Chat(ctx context.Context, messages []llm.Message, tools []llm.T
 	}
 	return replyFrom(parsed, llm.Message{Role: msg.Role, Content: msg.Content, ToolCalls: calls}), nil
 }
+
+// Limits on what a server may send. metron's whole premise is that the context
+// window is bounded; a reply that cannot be bounded is a reply that defeats it,
+// and a remote endpoint is not necessarily one the operator controls.
+const (
+	maxResponseBytes = 32 << 20 // one whole response
+	maxContentBytes  = 8 << 20  // assembled reply text
+	maxStreamCalls   = 64       // distinct tool-call indices in one reply
+	maxErrorBytes    = 8 << 10  // a server's own error message
+)
 
 // readStream assembles a server-sent-events stream into one reply.
 //
@@ -207,6 +222,9 @@ func (c *Client) readStream(body io.Reader, watchdog *time.Timer) (*llm.Reply, e
 			role = delta.Role
 		}
 		if delta.Content != "" {
+			if content.Len()+len(delta.Content) > maxContentBytes {
+				return nil, fmt.Errorf("reply exceeded %d bytes", maxContentBytes)
+			}
 			content.WriteString(delta.Content)
 			if c.opts.Sink != nil {
 				fmt.Fprint(c.opts.Sink, delta.Content)
@@ -219,12 +237,20 @@ func (c *Client) readStream(body io.Reader, watchdog *time.Timer) (*llm.Reply, e
 			}
 			existing, seen := partial[idx]
 			if !seen {
+				// A real reply carries a handful of calls. An index the server
+				// picks is otherwise an unbounded map key.
+				if len(partial) >= maxStreamCalls {
+					return nil, fmt.Errorf("reply carried more than %d tool calls", maxStreamCalls)
+				}
 				existing = &wireToolCall{}
 				partial[idx] = existing
 				order = append(order, idx)
 			}
 			if frag.Function.Name != "" {
 				existing.Function.Name = frag.Function.Name
+			}
+			if len(existing.Function.Arguments)+len(frag.Function.Arguments) > maxContentBytes {
+				return nil, fmt.Errorf("tool call arguments exceeded %d bytes", maxContentBytes)
 			}
 			existing.Function.Arguments += frag.Function.Arguments
 		}

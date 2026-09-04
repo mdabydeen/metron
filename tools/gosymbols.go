@@ -40,10 +40,25 @@ func skipDir(name string) bool {
 	return strings.HasPrefix(name, ".") || skippedDirs[name]
 }
 
+// Bounds on the built-in index, mirroring the ones internal/repomap applies for
+// the same reason: the work has to be predictable, not proportional to whatever
+// tree metron was pointed at.
+const (
+	maxGoFilesExamined = 5000
+	maxGoFileBytes     = 1 << 20
+)
+
 // walkGoFiles calls visit for every Go source file under Root, stopping early
 // if visit returns false. Walk errors are swallowed on purpose: an unreadable
 // directory should cost the symbols in it and nothing more.
 func (e Env) walkGoFiles(visit func(path string) bool) {
+	e.walkGoFilesLimited(visit, maxGoFilesExamined)
+}
+
+// walkGoFilesLimited is walkGoFiles with the cap as a parameter, so a test can
+// reach the cap without laying down thousands of files.
+func (e Env) walkGoFilesLimited(visit func(path string) bool, limit int) {
+	examined := 0
 	_ = filepath.WalkDir(e.Root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -55,6 +70,19 @@ func (e Env) walkGoFiles(visit func(path string) bool) {
 			return nil
 		}
 		if !strings.HasSuffix(d.Name(), ".go") {
+			return nil
+		}
+		// Bounded like every other tool. find_symbol can be called on every
+		// turn, and an unbounded walk-and-parse of the whole tree per call is
+		// the sort of cost this program exists to refuse -- an enormous
+		// repository would otherwise spend the turn budget on filesystem work.
+		examined++
+		if examined > limit {
+			return fs.SkipAll
+		}
+		// A file large enough to be generated is not what find_symbol is for,
+		// and parsing it costs more than the answer is worth.
+		if info, err := d.Info(); err == nil && info.Size() > maxGoFileBytes {
 			return nil
 		}
 		if !visit(path) {

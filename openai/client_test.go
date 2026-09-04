@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -367,5 +368,70 @@ func TestStreamStopsAtDone(t *testing.T) {
 	}
 	if reply.Content != "kept" {
 		t.Fatalf("content = %q, want the stream to stop at [DONE]", reply.Content)
+	}
+}
+
+func TestStreamRefusesAnUnboundedReply(t *testing.T) {
+	// The idle watchdog resets on every chunk, so a server that streams steadily
+	// is never idle and never cancelled. Without a size limit that is an
+	// out-of-memory condition a remote endpoint can trigger at will.
+	chunk := `data: {"choices":[{"delta":{"content":"` + strings.Repeat("x", 60000) + `"}}]}` + "\n\n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for i := 0; i < 200; i++ {
+			if _, err := io.WriteString(w, chunk); err != nil {
+				return
+			}
+		}
+	}))
+	defer srv.Close()
+	opts := llm.DefaultOptions()
+	opts.Stream = true
+
+	_, err := NewClient(srv.URL, "m", opts).Chat(context.Background(), nil, nil)
+
+	if err == nil || !strings.Contains(err.Error(), "exceeded") {
+		t.Fatalf("Chat() error = %v, want the reply bounded", err)
+	}
+}
+
+func TestStreamRefusesTooManyToolCalls(t *testing.T) {
+	var b strings.Builder
+	for i := 0; i < maxStreamCalls+10; i++ {
+		fmt.Fprintf(&b, `data: {"choices":[{"delta":{"tool_calls":[{"index":%d,`+
+			`"function":{"name":"view_slice","arguments":"{}"}}]}}]}`+"\n\n", i)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, b.String())
+	}))
+	defer srv.Close()
+	opts := llm.DefaultOptions()
+	opts.Stream = true
+
+	// A server picks the index, so it is otherwise an unbounded map key.
+	_, err := NewClient(srv.URL, "m", opts).Chat(context.Background(), nil, nil)
+
+	if err == nil || !strings.Contains(err.Error(), "tool calls") {
+		t.Fatalf("Chat() error = %v, want the call count bounded", err)
+	}
+}
+
+func TestStreamRefusesUnboundedToolArguments(t *testing.T) {
+	chunk := `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":` +
+		`{"name":"view_slice","arguments":"` + strings.Repeat("x", 60000) + `"}}]}}]}` + "\n\n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for i := 0; i < 200; i++ {
+			if _, err := io.WriteString(w, chunk); err != nil {
+				return
+			}
+		}
+	}))
+	defer srv.Close()
+	opts := llm.DefaultOptions()
+	opts.Stream = true
+
+	_, err := NewClient(srv.URL, "m", opts).Chat(context.Background(), nil, nil)
+
+	if err == nil || !strings.Contains(err.Error(), "exceeded") {
+		t.Fatalf("Chat() error = %v, want the arguments bounded", err)
 	}
 }

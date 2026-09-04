@@ -17,10 +17,12 @@ import (
 // and nothing else. It exists so a caller -- the benchmark first among them --
 // can read what a run cost without scraping prose.
 type Result struct {
-	Answer       string          `json:"answer"`
-	OK           bool            `json:"ok"`
-	Error        string          `json:"error,omitempty"`
-	Turns        int             `json:"turns"`
+	Answer string `json:"answer"`
+	OK     bool   `json:"ok"`
+	Error  string `json:"error,omitempty"`
+	// Calls is the number of tools the run dispatched. It was once labelled
+	// "turns", which it never was -- a turn can dispatch several tools, or none.
+	Calls        int             `json:"tool_calls"`
 	Tools        []agent.ToolRun `json:"tools"`
 	Usage        usage           `json:"usage"`
 	FilesChanged []string        `json:"files_changed"`
@@ -45,17 +47,21 @@ func oneShot(ctx context.Context, out, errOut io.Writer, env tools.Env, bot step
 
 	if !f.asJSON {
 		if err != nil {
-			fmt.Fprintf(errOut, "error: %v\n", err)
+			fmt.Fprintf(errOut, "error: %s\n", escapeControl(err.Error()))
 			return 1
 		}
-		fmt.Fprintln(out, answer)
+		// Escaped like the REPL's: one-shot output is piped as often as it is
+		// read, but a terminal is the common case and neither should be handed
+		// escape sequences the model chose. --json needs no escaping, since
+		// encoding/json escapes control characters itself.
+		fmt.Fprintln(out, escapeControl(answer))
 		return 0
 	}
 
 	res := Result{
 		Answer:       answer,
 		OK:           err == nil,
-		Turns:        len(bot.LastTools()),
+		Calls:        len(bot.LastTools()),
 		Tools:        bot.LastTools(),
 		FilesChanged: changedSince(env.Root, before),
 	}

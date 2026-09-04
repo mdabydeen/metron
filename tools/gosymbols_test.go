@@ -215,3 +215,71 @@ func TestFindSymbolCapsTheNumberOfMatches(t *testing.T) {
 		t.Fatalf("last line = %q, want the truncation noted", lines[len(lines)-1])
 	}
 }
+
+func TestGoIndexIsBounded(t *testing.T) {
+	dir := workdir(t)
+	// A file large enough to be generated is not what find_symbol is for, and
+	// parsing it costs more than the answer is worth.
+	var big strings.Builder
+	big.WriteString("package big\n")
+	for i := 0; big.Len() < maxGoFileBytes+1024; i++ {
+		fmt.Fprintf(&big, "func Generated%d() {}\n", i)
+	}
+	writeFile(t, filepath.Join(dir, "generated.go"), big.String())
+	writeFile(t, filepath.Join(dir, "small.go"), "package big\n\nfunc Wanted() {}\n")
+
+	env := NewEnv(DefaultBudgets())
+
+	if got := env.findGoSymbol("Generated0"); len(got) != 0 {
+		t.Errorf("findGoSymbol() = %v, want the oversized file skipped", got)
+	}
+	// The bound must not cost the answers it was not meant to.
+	if got := env.findGoSymbol("Wanted"); len(got) != 1 {
+		t.Fatalf("findGoSymbol() = %v, want the ordinary file still indexed", got)
+	}
+}
+
+func TestGoIndexStopsAfterEnoughFiles(t *testing.T) {
+	dir := workdir(t)
+	// find_symbol can be called on every turn; an unbounded walk-and-parse of
+	// the whole tree per call is the cost this program exists to refuse.
+	for i := 0; i < 12; i++ {
+		writeFile(t, filepath.Join(dir, fmt.Sprintf("f%d.go", i)),
+			fmt.Sprintf("package p\n\nfunc Sym%d() {}\n", i))
+	}
+	env := NewEnv(DefaultBudgets())
+
+	seen := 0
+	env.walkGoFiles(func(string) bool { seen++; return true })
+
+	if seen != 12 {
+		t.Fatalf("walked %d files, want all 12 below the cap", seen)
+	}
+	if maxGoFilesExamined <= 0 {
+		t.Fatal("the file cap is not set")
+	}
+}
+
+func TestGoIndexStopsAtTheFileCap(t *testing.T) {
+	dir := workdir(t)
+	for i := 0; i < 6; i++ {
+		writeFile(t, filepath.Join(dir, fmt.Sprintf("f%d.go", i)),
+			fmt.Sprintf("package p\n\nfunc Sym%d() {}\n", i))
+	}
+	env := NewEnv(DefaultBudgets())
+
+	// find_symbol can be called on every turn, so the walk has to stop
+	// somewhere regardless of how large the tree is.
+	seen := 0
+	env.walkGoFilesLimited(func(string) bool { seen++; return true }, 2)
+	if seen != 2 {
+		t.Fatalf("walked %d files with a cap of 2", seen)
+	}
+
+	// The visitor's own early stop still works.
+	seen = 0
+	env.walkGoFilesLimited(func(string) bool { seen++; return seen < 3 }, 100)
+	if seen != 3 {
+		t.Fatalf("walked %d files, want the visitor's early stop honoured", seen)
+	}
+}

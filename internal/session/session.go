@@ -79,8 +79,11 @@ func (s Store) ensureDir() error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
+	// Checked by content, not existence: a repository shipping its own empty
+	// .metron/.gitignore would otherwise keep it, and transcripts -- every file
+	// the model read -- would be swept into the next `git add -A`.
 	marker := filepath.Join(s.Root, Dir, ".gitignore")
-	if _, err := os.Stat(marker); err == nil {
+	if b, err := os.ReadFile(marker); err == nil && strings.TrimSpace(string(b)) == "*" {
 		return nil
 	}
 	return os.WriteFile(marker, []byte("*\n"), 0o644)
@@ -94,6 +97,13 @@ func (s Store) ensureDir() error {
 // agent no longer has. The write goes through a temporary file and a rename, so
 // a crash mid-save leaves the previous transcript rather than half of a new one.
 func (s Store) Save(meta Meta, messages []llm.Message) error {
+	// The id can come from a transcript rather than from NewID -- resume adopts
+	// the saved session's identity -- so it is untrusted here for the same
+	// reason it is untrusted in Load. Path joins it onto a directory, and a
+	// transcript holds every file the model read.
+	if !ValidID(meta.ID) {
+		return fmt.Errorf("refusing to save session %q: not a session id", meta.ID)
+	}
 	if err := s.ensureDir(); err != nil {
 		return fmt.Errorf("create session directory: %w", err)
 	}
@@ -172,6 +182,10 @@ func (s Store) Load(id string) (Meta, []llm.Message, error) {
 	}
 	if meta.ID == "" {
 		return Meta{}, nil, fmt.Errorf("session %s has no metadata", id)
+	}
+	if meta.ID != id {
+		// The file's own idea of its identity is what a later Save would use.
+		return Meta{}, nil, fmt.Errorf("session %s claims to be %q", id, meta.ID)
 	}
 	return meta, messages, nil
 }

@@ -400,3 +400,44 @@ func TestChatIdleTimeoutCancelsAStalledRequest(t *testing.T) {
 		t.Fatal("Chat() = nil error, want the idle watchdog to give up")
 	}
 }
+
+func TestStreamIsBounded(t *testing.T) {
+	// The idle watchdog resets on every chunk, so a server that streams steadily
+	// is never idle and never cancelled -- an out-of-memory condition without a
+	// size limit.
+	t.Run("content", func(t *testing.T) {
+		chunk := `{"message":{"role":"assistant","content":"` + strings.Repeat("x", 60000) + `"}}` + "\n"
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			for i := 0; i < 200; i++ {
+				if _, err := io.WriteString(w, chunk); err != nil {
+					return
+				}
+			}
+		}))
+		defer srv.Close()
+		opts := llm.DefaultOptions()
+		opts.Stream = true
+		_, err := NewClient(srv.URL, "m", opts).Chat(context.Background(), nil, nil)
+		if err == nil || !strings.Contains(err.Error(), "exceeded") {
+			t.Fatalf("Chat() error = %v, want the reply bounded", err)
+		}
+	})
+
+	t.Run("tool calls", func(t *testing.T) {
+		one := `{"message":{"role":"assistant","tool_calls":[{"function":{"name":"view_slice","arguments":{}}}]}}` + "\n"
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			for i := 0; i < maxStreamCalls+10; i++ {
+				if _, err := io.WriteString(w, one); err != nil {
+					return
+				}
+			}
+		}))
+		defer srv.Close()
+		opts := llm.DefaultOptions()
+		opts.Stream = true
+		_, err := NewClient(srv.URL, "m", opts).Chat(context.Background(), nil, nil)
+		if err == nil || !strings.Contains(err.Error(), "tool calls") {
+			t.Fatalf("Chat() error = %v, want the call count bounded", err)
+		}
+	})
+}

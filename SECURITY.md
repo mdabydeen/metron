@@ -108,13 +108,49 @@ tree, not the narrowness of the prefix. Narrow entries still help -- they make
 an unexpected command visible rather than routine -- but do not mistake them for
 a sandbox.
 
-**A project cannot grant itself any of this.** `.metron.json` travels with a
+**A project cannot grant itself any of this.** (See "Where the model is" for the
+rest of what a project file may not set.) `.metron.json` travels with a
 repository, and it is the highest-priority config file, so a cloned repository
 could otherwise set `auto_approve_patches` and `allowed_commands` and turn
 `git clone && metron` into arbitrary code execution before the first turn. Those
 settings -- and `save_sessions` -- are honoured only from your user-level config
 or from a file you name with `METRON_CONFIG`. A project file that sets them is
 reported on stderr and ignored.
+
+**Where the model is.** metron was written for a local Ollama, and most of this
+document reasons that way. It also speaks the OpenAI chat-completions format,
+which means the endpoint can be anywhere -- and then the model is no longer
+something you control.
+
+- **The endpoint is not something a repository may choose.** `provider`,
+  `endpoint`, `api_key_env` and `system_prompt_extra` are privileged, alongside
+  `auto_approve_patches`, `allowed_commands` and `save_sessions`. A cloned
+  repository could otherwise point metron at a server it ran, name an
+  environment variable for metron to send as a bearer token, and append its own
+  instructions to the system prompt -- so `git clone && metron` would exfiltrate
+  a secret and hand the attacker a read primitive over your project through
+  tools that never prompt. A project file that sets any of them is reported on
+  stderr and ignored. `model` is *not* privileged: with the endpoint pinned to
+  your own server, naming a model can only choose among what you installed.
+- **A non-local endpoint is announced at startup**, on stderr, with a note when
+  it is plain HTTP. If you see that line and did not expect it, stop.
+- **An API key is named, not held.** `api_key_env` names an environment variable;
+  the key is read at use, never written to a config file, a transcript or
+  `--json`. `/config` prints the variable's name.
+- **A remote endpoint sees everything metron reads.** That is inherent, not a
+  flaw: the tool results are the conversation. Do not point metron at a server
+  you do not trust and then at a repository you care about.
+- **Replies are bounded.** Response size, assembled reply text, tool-call count
+  and tool-call arguments all have ceilings, because the idle watchdog resets on
+  every chunk -- a server that streams steadily is never idle, and without limits
+  that is an out-of-memory condition it can trigger at will.
+
+**What reaches your terminal.** Everything the model writes is escaped before it
+is printed: the streamed reply, the final answer, tool output and the text of
+errors carrying a server's own message. Printed raw, that text can clear the
+screen, overpaint a diff you have just approved, retitle the window, or write
+your clipboard with OSC 52 -- and a comment in a file metron reads is enough to
+steer it. Control characters are rendered visibly rather than executed.
 
 **Remaining limitations** -- these are real:
 
@@ -126,6 +162,13 @@ reported on stderr and ignored.
 - **Confinement is the project directory, not a sandbox.** Everything inside the
   project is fair game, including files you would rather the model not read.
   There is no per-file policy and no allowlist.
+- **Hard links are not detected.** Path confinement resolves symlinks, so a
+  symlinked file or directory cannot be used to step outside the project. A
+  *hard* link inside the project to a file outside it is invisible to that
+  check, and writing through it writes the shared inode. Creating one requires
+  `run_command` with something like `ln` permitted, or a link that was already
+  there, so it is narrow -- but "every path is confined to the project" should
+  be read with this exception in mind.
 - **An allowed command is not confined.** `run_command` sets the working
   directory to the project, but the command itself runs with your full user
   privileges and can reach anything you can. Path confinement bounds metron's
@@ -148,7 +191,8 @@ approval prompt, and does not claim to.
 ## What metron does not do
 
 - No telemetry, no analytics, no crash reporting, no network calls other than to the
-  endpoint you configure.
+  configured model endpoint. Note the wording: metron calls *an endpoint*, and where
+  that endpoint is depends on configuration. See "Where the model is" below.
 - metron has no account, no login, and stores no credentials of its own. It does
   not follow that nothing sensitive is stored: with `save_sessions` on, whatever
   the model read is written to `.metron/sessions/`.

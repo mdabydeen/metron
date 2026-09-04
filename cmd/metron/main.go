@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
@@ -136,9 +137,12 @@ func runMain(args []string, in io.Reader, out, errOut io.Writer) int {
 	// streams; there is no reader watching it arrive.
 	streamed := cfg.Stream && f.prompt == ""
 	if streamed {
-		clientOpts.Sink = out
+		clientOpts.Sink = safeWriter{out}
 	} else {
 		clientOpts.Stream = false
+	}
+	if warn := remoteEndpointWarning(cfg.Endpoint); warn != "" {
+		fmt.Fprintf(errOut, "\033[1;33mwarning: %s\033[0m\n", warn)
 	}
 	client := newProvider(cfg, clientOpts)
 
@@ -233,6 +237,25 @@ func resumeTarget(store session.Store, f flags) (string, error) {
 // maxInputLine lets a pasted diff or a long request through; the scanner
 // default of 64KB silently ends the session on anything larger.
 const maxInputLine = 1 << 20
+
+// safeWriter escapes control characters in everything written through it.
+//
+// Model output reaches the terminal in three places -- the streamed reply, the
+// final answer, and error text carrying a server's own message -- and all three
+// are attacker-influenced: a comment in a file metron reads can steer what the
+// model writes. Printed raw, that text can clear the screen, overpaint a diff
+// the operator has just approved, retitle the window, or write the clipboard
+// with OSC 52. None of those are things a coding answer needs to do.
+type safeWriter struct{ w io.Writer }
+
+func (s safeWriter) Write(p []byte) (int, error) {
+	if _, err := io.WriteString(s.w, escapeControl(string(p))); err != nil {
+		return 0, err
+	}
+	// Report the caller's length: the escaped form is longer, and a short write
+	// is not what happened.
+	return len(p), nil
+}
 
 // approvalWording is what the prompt says for each kind of effect. A command is
 // not a patch: the operator is being asked to let something execute, not to
@@ -357,7 +380,7 @@ func run(ctx context.Context, scanner *bufio.Scanner, out io.Writer, cfg config.
 			continue
 		}
 		if err != nil {
-			fmt.Fprintf(out, "\033[31mError: %v\033[0m\n", err)
+			fmt.Fprintf(out, "\033[31mError: %s\033[0m\n", escapeControl(err.Error()))
 			continue
 		}
 
@@ -365,7 +388,7 @@ func run(ctx context.Context, scanner *bufio.Scanner, out io.Writer, cfg config.
 			// Already printed as it arrived; reprinting would double it.
 			fmt.Fprintln(out)
 		} else {
-			fmt.Fprintf(out, "\n\033[1m%s\033[0m\n", resp)
+			fmt.Fprintf(out, "\n\033[1m%s\033[0m\n", escapeControl(resp))
 		}
 		reportUsage(out, bot, cfg.NumCtx)
 		sess.save(bot)
@@ -538,4 +561,27 @@ func setBudget(out io.Writer, bot stepper, arg string) {
 		return
 	}
 	fmt.Fprintf(out, "Per-turn ceiling set to %d prompt tokens.\n", n)
+}
+
+// remoteEndpointWarning names an endpoint that is not on this machine.
+//
+// metron's documented posture is that the conversation -- which is every file
+// the model reads -- does not leave the machine. That is only true while the
+// endpoint is local, and the endpoint is a setting. Saying so once at startup
+// costs a line and is the difference between a property and an assumption.
+func remoteEndpointWarning(endpoint string) string {
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	host := u.Hostname()
+	if host == "localhost" || host == "::1" || strings.HasPrefix(host, "127.") {
+		return ""
+	}
+	insecure := ""
+	if u.Scheme == "http" {
+		insecure = ", over plain HTTP"
+	}
+	return fmt.Sprintf("the model endpoint is %s%s. Everything metron reads goes there, "+
+		"including any secret in the files it opens", u.Host, insecure)
 }

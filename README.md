@@ -210,8 +210,12 @@ cp metron.example.json .metron.json
 **Some settings are not accepted from a project file.** `.metron.json` travels with a
 repository, and it is the highest-priority config file — so a repository you cloned could
 otherwise switch off the approval prompt and switch on `run_command` before the first turn.
-`auto_approve_patches`, `allowed_commands` and `save_sessions` are honoured only from your
-user-level config or a file you name with `METRON_CONFIG`. A project file that sets them is
+`auto_approve_patches`, `allowed_commands`, `save_sessions`, `provider`, `endpoint`,
+`api_key_env` and `system_prompt_extra` are honoured only from your user-level config or a
+file you name with `METRON_CONFIG` — the last four because a repository that could set them
+would point metron at a server it ran and name an environment variable for metron to send as
+a bearer token. `model` is not on that list: with the endpoint pinned, it can only choose
+among models on your own server. A project file that sets them is
 reported on stderr and ignored.
 
 A file that exists but cannot be read or parsed is a startup error, not a silent fallback —
@@ -407,7 +411,7 @@ full of line numbers and quoted code that may no longer be true.
 {
   "answer": "Greet now returns hola.",
   "ok": true,
-  "turns": 3,
+  "tool_calls": 3,
   "tools": [{"name": "view_slice", "ms": 2}, {"name": "edit_file", "ms": 1}],
   "usage": {"prompt": 7341, "generated": 511},
   "files_changed": ["greet.go"]

@@ -84,6 +84,38 @@ The first tagged release.
 
 ### Security
 
+- **A project's `.metron.json` cannot choose the model endpoint.** The privileged list
+  covered the settings that grant execution, but not the ones that decide *where the model
+  is* and *what it is told* -- so a cloned repository could set `provider`, `endpoint`,
+  `api_key_env` and `system_prompt_extra`, pointing metron at a server it ran, naming an
+  environment variable for metron to send as a bearer token, and appending its own
+  instructions to the system prompt. `git clone && metron` would then exfiltrate a secret and
+  hand the attacker a read primitive over the project through tools that never prompt. The
+  key list and the code that resets those settings are now one structure, because they were
+  two, drifted, and let this happen twice.
+- **A non-local endpoint is announced at startup**, on stderr, noting when it is plain HTTP.
+- **Model output can no longer drive the terminal.** The streamed reply, the final answer and
+  error text carrying a server's own message were printed raw. A comment in a file metron
+  reads is enough to steer what the model writes, so those strings could clear the screen,
+  overpaint a diff just approved, retitle the window, or write the clipboard with OSC 52.
+- **Replies from a model server are bounded** -- total size, assembled text, tool-call count
+  and argument length. The idle watchdog resets on every chunk, so a server that streams
+  steadily is never idle and, unbounded, exhausts memory.
+- **The per-turn ceiling survives a server that misreports token counts.** The
+  bytes-per-token estimate is clamped. This is a correctness fix before a security one: a
+  server reporting only uncached tokens under prompt caching poisoned it identically, after
+  which the ceiling silently stopped holding.
+- **Session ids from a transcript are validated on save, not only on load**, and a transcript
+  whose recorded id disagrees with its filename is refused. `--resume` adopts the saved
+  identity, so the id in the file was the one a later save wrote with.
+- **`Restore` allowlists conversational roles** rather than skipping `system`. A role of
+  `developer`, or `system ` with a trailing space, would otherwise be restored with authority
+  -- and transcripts are exactly the thing people attach to bug reports.
+- **`.metron/.gitignore` is checked by content.** A repository shipping a hollow one kept it,
+  and transcripts -- every file the model read -- became visible to `git add -A`.
+- **The built-in Go symbol index is bounded**, in files examined and file size, like every
+  other tool.
+
 - **A project's `.metron.json` can no longer grant itself permissions.** It is the
   highest-priority config file and ships inside whatever repository metron is pointed at, so
   a cloned repository could set `auto_approve_patches` and `allowed_commands` and turn

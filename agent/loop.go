@@ -96,6 +96,14 @@ type Agent struct {
 	schemas     []llm.Tool
 	unavailable map[string]string
 
+	// seedCount is how many opening messages are structural rather than
+	// conversational -- the system prompt, and the repo map if there is one.
+	// It is fixed when the history is seeded rather than recounted, because an
+	// elision note is also a system message: counting leading system messages
+	// would fold each note into the seed, so the next trim would insert another
+	// after it and the notes would accumulate without bound.
+	seedCount int
+
 	// bytesPerToken is calibrated from what the server reports, so the estimate
 	// used to enforce MaxPromptTokens tracks the model actually in use rather
 	// than a constant that is wrong for every tokeniser.
@@ -160,6 +168,7 @@ func New(client Chatter, opts Options) *Agent {
 		unavailable: unavailable,
 	}
 	a.messages = a.seed()
+	a.seedCount = len(a.messages)
 	a.bytesPerToken = defaultBytesPerToken
 	return a
 }
@@ -201,9 +210,9 @@ func (a *Agent) calibrate(promptTokens int) {
 		return
 	}
 	// historyBytes is never zero -- the schemas alone marshal to something --
-	// so the ratio is always positive and needs no guard.
+	// so the ratio is always positive.
 	observed := float64(a.historyBytes()) / float64(promptTokens)
-	a.bytesPerToken = 0.7*a.bytesPerToken + 0.3*observed
+	a.bytesPerToken = clampRatio(0.7*a.bytesPerToken + 0.3*observed)
 }
 
 // seed builds the opening history: the system prompt, and the repo map when one
@@ -286,6 +295,7 @@ func (a *Agent) AdvertisedTools() (names []string, schemaBytes int) {
 // context window without restarting the process.
 func (a *Agent) Reset() {
 	a.messages = a.seed()
+	a.seedCount = len(a.messages)
 }
 
 var toolDefs = map[string]llm.Tool{
@@ -662,23 +672,42 @@ func (a *Agent) trimHistory() {
 		dropped = append(dropped, body[0])
 		body = body[1:]
 	}
+	// The previous note is itself among the dropped messages, so it is folded
+	// into the new one rather than counted as a single message. Without this a
+	// long session accumulates one note per trim -- paying, on every request,
+	// for a growing list of announcements that something was removed to save
+	// tokens -- and the counts reset each time instead of adding up.
 	a.messages = append(a.messages[:keep:keep], elisionNote(dropped))
 	a.messages = append(a.messages, body...)
 }
 
-// seedLen is how many opening messages are structural rather than
-// conversational: the system prompt, and the repo map if there is one. They are
-// never trimmed.
+// seedLen is the number of structural opening messages, never fewer than one:
+// a zero-valued Agent still has to keep its first message.
 func (a *Agent) seedLen() int {
-	n := 0
-	for _, m := range a.messages {
-		if m.Role != "system" {
-			break
-		}
-		n++
-	}
-	if n == 0 {
+	if a.seedCount < 1 {
 		return 1
+	}
+	return a.seedCount
+}
+
+// elisionMarker is what makes a note recognisable to a later trim.
+const elisionMarker = "earlier messages elided"
+
+func isElisionNote(m llm.Message) bool {
+	return m.Role == "system" && strings.Contains(m.Content, elisionMarker)
+}
+
+// countElided reads the number back out of a note, so a later trim can carry it
+// forward. A note may come from a restored transcript, so it is not necessarily
+// one metron wrote: anything unparseable counts as nothing.
+func countElided(m llm.Message) int {
+	digits, _, found := strings.Cut(strings.TrimPrefix(m.Content, "["), " ")
+	if !found {
+		return 0
+	}
+	n, err := strconv.Atoi(digits)
+	if err != nil || n < 0 {
+		return 0
 	}
 	return n
 }
@@ -689,7 +718,15 @@ func (a *Agent) seedLen() int {
 func elisionNote(dropped []llm.Message) llm.Message {
 	counts := map[string]int{}
 	var order []string
+	total := 0
 	for _, m := range dropped {
+		// A note already among the dropped messages stands for everything it
+		// summarised, not for one message.
+		if isElisionNote(m) {
+			total += countElided(m)
+			continue
+		}
+		total++
 		if m.Role != "tool" || m.ToolName == "" {
 			continue
 		}
@@ -706,7 +743,7 @@ func elisionNote(dropped []llm.Message) llm.Message {
 			parts = append(parts, name)
 		}
 	}
-	note := fmt.Sprintf("[%d earlier messages elided to stay within the context budget", len(dropped))
+	note := fmt.Sprintf("[%d %s to stay within the context budget", total, elisionMarker)
 	if len(parts) > 0 {
 		note += ": " + strings.Join(parts, ", ")
 	}
@@ -732,6 +769,32 @@ func (a *Agent) MaxPromptTokens() int { return a.opts.MaxPromptTokens }
 // operator can see the number the ceiling is compared against rather than
 // having to trust it.
 func (a *Agent) EstimatedPromptTokens() int { return a.estimatePromptTokens() }
+
+// Bytes per token is between about 2 and 6 for every tokeniser metron is likely
+// to meet, on code or on prose. Clamping to a wider band than that admits real
+// variation while refusing nonsense.
+//
+// The nonsense is not hypothetical, and is a correctness problem before it is a
+// security one: a server reporting only *uncached* prompt tokens under prompt
+// caching reports a fraction of the real count, which without a clamp drives the
+// ratio up until the estimate collapses and the ceiling silently stops holding.
+// A server that wanted to defeat the ceiling would do exactly the same thing on
+// purpose. Driven the other way the ratio approaches zero, and dividing by it
+// yields a value Go leaves undefined -- which also disables the ceiling.
+const (
+	minBytesPerToken = 1.5
+	maxBytesPerToken = 8.0
+)
+
+func clampRatio(r float64) float64 {
+	if r < minBytesPerToken {
+		return minBytesPerToken
+	}
+	if r > maxBytesPerToken {
+		return maxBytesPerToken
+	}
+	return r
+}
 
 // LastTools reports the tools the most recent Step ran, in order.
 func (a *Agent) LastTools() []ToolRun { return a.lastTools }
@@ -760,10 +823,15 @@ func (a *Agent) Messages() []llm.Message {
 func (a *Agent) Restore(messages []llm.Message) {
 	a.Reset()
 	for _, m := range messages {
-		if m.Role == "system" {
-			continue
+		// An allowlist, not a "skip system" check. A transcript is a file, and
+		// the package doc invites people to attach one to a bug report -- so a
+		// role of "developer" (system-equivalent on OpenAI-compatible servers)
+		// or "system " with a trailing space would otherwise be restored with
+		// authority the operator never granted.
+		switch m.Role {
+		case "user", "assistant", "tool":
+			a.messages = append(a.messages, m)
 		}
-		a.messages = append(a.messages, m)
 	}
 	a.trimHistory()
 }

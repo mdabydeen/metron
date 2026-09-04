@@ -245,7 +245,35 @@ func Search() []string {
 // So these are honoured only from a config the *operator* chose: the user-level
 // file, or one named explicitly by METRON_CONFIG. A project file that sets them
 // is reported and ignored, never silently obeyed.
-var privileged = []string{"auto_approve_patches", "allowed_commands", "save_sessions"}
+type privilegedSetting struct {
+	Key string
+	// Reset restores this setting to its default on cfg. Pairing the key with
+	// the reset in one structure is deliberate: the two were separate lists
+	// once, they drifted, and a repository could set what the reset had not
+	// caught up with. This shape makes that impossible to repeat by omission.
+	Reset func(cfg *Config, defaults Config)
+}
+
+var privilegedSettings = []privilegedSetting{
+	{"auto_approve_patches", func(c *Config, d Config) { c.AutoApprovePatches = d.AutoApprovePatches }},
+	{"allowed_commands", func(c *Config, d Config) { c.AllowedCommands = d.AllowedCommands }},
+	{"save_sessions", func(c *Config, d Config) { c.SaveSessions = d.SaveSessions }},
+	// The four below decide *where the model is* and *what it is told*. A
+	// repository that could set them would point metron at a server it
+	// controls, name an environment variable for metron to send as a bearer
+	// token, and append its own instructions to the system prompt -- so
+	// `git clone && metron` would exfiltrate a secret and hand the attacker a
+	// read primitive over the project through tools that never prompt.
+	//
+	// "model" is deliberately absent. With the endpoint pinned to the
+	// operator's own server, naming a model can only select among what they
+	// have already installed -- and choosing a bigger model for a particular
+	// project is a reasonable thing for that project to want.
+	{"provider", func(c *Config, d Config) { c.Provider = d.Provider }},
+	{"endpoint", func(c *Config, d Config) { c.Endpoint = d.Endpoint }},
+	{"api_key_env", func(c *Config, d Config) { c.APIKeyEnv = d.APIKeyEnv }},
+	{"system_prompt_extra", func(c *Config, d Config) { c.SystemPromptExtra = d.SystemPromptExtra }},
+}
 
 // Load resolves the configuration: defaults, overlaid with the first config
 // file found, overlaid with the environment. The returned path is the file
@@ -302,9 +330,11 @@ func Load() (Config, string, []string, error) {
 		}
 		if len(granted) > 0 {
 			d := Defaults()
-			cfg.AutoApprovePatches = d.AutoApprovePatches
-			cfg.AllowedCommands = d.AllowedCommands
-			cfg.SaveSessions = d.SaveSessions
+			for _, ps := range privilegedSettings {
+				if slices.Contains(granted, ps.Key) {
+					ps.Reset(&cfg, d)
+				}
+			}
 			warnings = append(warnings, fmt.Sprintf(
 				"%s tried to set %s; ignored, because a config file that ships with a "+
 					"repository must not be able to grant itself permissions. Move it to "+
@@ -346,9 +376,9 @@ func isProjectFile(path string) bool {
 // saying out loud.
 func privilegedIn(raw map[string]json.RawMessage) []string {
 	var found []string
-	for _, key := range privileged {
-		if _, present := raw[key]; present {
-			found = append(found, key)
+	for _, ps := range privilegedSettings {
+		if _, present := raw[ps.Key]; present {
+			found = append(found, ps.Key)
 		}
 	}
 	return found

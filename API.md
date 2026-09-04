@@ -40,6 +40,12 @@ should test yours.
   working directory. Every path a tool touches is confined to it. Set
   `Env.Root` explicitly if you want it somewhere else, and read `SECURITY.md`
   before you do.
+- **The endpoint.** `openai.NewClient` will attach the bearer token you give it
+  to whatever URL you give it, including a plain `http://` one, and Go's HTTP
+  client follows redirects (it does strip `Authorization` when a redirect
+  crosses hosts). metron's own CLI refuses to let a project file choose the
+  endpoint and announces a non-local one at startup; if you embed the library,
+  that judgement is yours to make.
 - **Execution.** `Env.Allowed` is empty by default, which withdraws
   `run_command` entirely. Populating it grants arbitrary code execution to
   whatever the model proposes; the approval prompt is the only thing between

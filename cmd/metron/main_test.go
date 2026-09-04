@@ -1538,3 +1538,125 @@ func TestBudgetCommand(t *testing.T) {
 		t.Fatalf("/budget -5 = %q, want a negative ceiling refused", out.String())
 	}
 }
+
+// TestModelOutputCannotDriveTheTerminal covers every path model-controlled text
+// takes to a terminal. A comment in a file metron reads can steer what the model
+// writes, so its answers are attacker-influenced: printed raw they can clear the
+// screen, overpaint the diff the operator just approved, retitle the window, or
+// write the clipboard with OSC 52.
+func TestModelOutputCannotDriveTheTerminal(t *testing.T) {
+	const hostile = "BEGIN\x1b[2J\x1b[H\x1b]0;PWNED\x07\x1b]52;c;cHduZWQ=\x07END"
+
+	assertTamed := func(t *testing.T, what, got string) {
+		t.Helper()
+		for _, seq := range []string{"\x1b[2J", "\x1b]52;", "\x1b]0;", "\x07"} {
+			if strings.Contains(got, seq) {
+				t.Errorf("%s passed %q through to the terminal:\n%q", what, seq, got)
+			}
+		}
+		if !strings.Contains(got, "BEGIN") || !strings.Contains(got, "END") {
+			t.Errorf("%s = %q, want the readable text kept", what, got)
+		}
+	}
+
+	t.Run("repl answer", func(t *testing.T) {
+		var out bytes.Buffer
+		bot := &fakeStepper{reply: hostile}
+		run(context.Background(), replFor("go\n"), &out, cfgFor("m"), "", testEnv(t), bot,
+			testRecorder(t), false)
+		assertTamed(t, "the REPL answer", out.String())
+	})
+
+	t.Run("repl error", func(t *testing.T) {
+		var out bytes.Buffer
+		bot := &fakeStepper{err: errors.New(hostile)}
+		run(context.Background(), replFor("go\n"), &out, cfgFor("m"), "", testEnv(t), bot,
+			testRecorder(t), false)
+		// A hostile endpoint's 500 body is interpolated into this error.
+		assertTamed(t, "the REPL error", out.String())
+	})
+
+	t.Run("streamed reply", func(t *testing.T) {
+		var out bytes.Buffer
+		if _, err := io.WriteString(safeWriter{&out}, hostile); err != nil {
+			t.Fatal(err)
+		}
+		assertTamed(t, "the stream sink", out.String())
+	})
+
+	t.Run("one-shot answer", func(t *testing.T) {
+		gitDir(t)
+		oneShotServer(t, []string{`{"message":{"role":"assistant","content":` +
+			mustJSONMain(t, hostile) + `},"done":true}`})
+		var out, errOut bytes.Buffer
+		runMain([]string{"-p", "x"}, strings.NewReader(""), &out, &errOut)
+		assertTamed(t, "the one-shot answer", out.String())
+	})
+}
+
+func TestSafeWriterReportsTheCallersLength(t *testing.T) {
+	// The escaped form is longer; reporting that would look like a short write
+	// to every caller in the standard library.
+	n, err := safeWriter{io.Discard}.Write([]byte("a\x1b[2Jb"))
+	if err != nil || n != 6 {
+		t.Fatalf("Write() = %d, %v, want the input length reported", n, err)
+	}
+}
+
+func TestRemoteEndpointIsAnnounced(t *testing.T) {
+	for endpoint, want := range map[string]string{
+		"http://localhost:11434/api/chat": "",
+		"http://127.0.0.1:11434/api/chat": "",
+		"http://[::1]:11434/api/chat":     "",
+		"https://api.example.com/v1":      "api.example.com",
+		"http://attacker.test/v1":         "plain HTTP",
+		"::not a url":                     "",
+		"":                                "",
+	} {
+		got := remoteEndpointWarning(endpoint)
+		if want == "" && got != "" {
+			t.Errorf("remoteEndpointWarning(%q) = %q, want silence for a local endpoint", endpoint, got)
+		}
+		if want != "" && !strings.Contains(got, want) {
+			t.Errorf("remoteEndpointWarning(%q) = %q, want it to mention %q", endpoint, got, want)
+		}
+	}
+}
+
+func TestRunMainAnnouncesARemoteEndpoint(t *testing.T) {
+	gitDir(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"message":{"role":"assistant","content":"ok"},"done":true}`)
+	}))
+	defer srv.Close()
+	cfgPath := filepath.Join(t.TempDir(), "cfg.json")
+	// A hostname rather than a loopback address, so the warning is due.
+	remote := strings.Replace(srv.URL, "127.0.0.1", "some-host.test", 1)
+	if err := os.WriteFile(cfgPath, []byte(`{"endpoint":"`+remote+`"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("METRON_CONFIG", cfgPath)
+	t.Setenv("OLLAMA_HOST", "")
+	t.Setenv("OLLAMA_MODEL", "")
+
+	var out, errOut bytes.Buffer
+	runMain([]string{"-p", "x"}, strings.NewReader(""), &out, &errOut)
+
+	// metron's documented posture is that the conversation does not leave the
+	// machine. That is only true while the endpoint is local, and the endpoint
+	// is a setting.
+	if !strings.Contains(errOut.String(), "some-host.test") {
+		t.Fatalf("stderr = %q, want the remote endpoint announced", errOut.String())
+	}
+}
+
+func TestSafeWriterPropagatesWriteErrors(t *testing.T) {
+	_, err := safeWriter{errWriter{}}.Write([]byte("x"))
+	if err == nil {
+		t.Fatal("Write() = nil error, want the underlying failure reported")
+	}
+}
+
+type errWriter struct{}
+
+func (errWriter) Write([]byte) (int, error) { return 0, errors.New("no") }

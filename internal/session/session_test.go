@@ -416,3 +416,64 @@ func TestSavedTranscriptsAreNotWorldReadable(t *testing.T) {
 		t.Fatalf("mode = %v, want 0600 for a file holding read file contents", perm)
 	}
 }
+
+// TestSaveRefusesAnIdFromACraftedTranscript covers the path a resumed session
+// takes: recorder.resume adopts the saved metadata, so the id in the file is the
+// one a later Save writes with. A transcript holds every file the model read.
+func TestSaveRefusesAnIdFromACraftedTranscript(t *testing.T) {
+	s := store(t)
+
+	err := s.Save(Meta{ID: "../../../outside/pwned"}, nil)
+
+	if err == nil || !strings.Contains(err.Error(), "not a session id") {
+		t.Fatalf("Save() = %v, want an id that is really a path refused", err)
+	}
+	if fileExistsAt(filepath.Join(s.Root, "..", "..", "..", "outside", "pwned.jsonl")) {
+		t.Fatal("a transcript was written outside the store")
+	}
+}
+
+func TestLoadRefusesATranscriptThatClaimsAnotherIdentity(t *testing.T) {
+	s := store(t)
+	if err := s.ensureDir(); err != nil {
+		t.Fatal(err)
+	}
+	// The file's own idea of its identity is what a later Save would use.
+	body := `{"id":"../../../outside/pwned","model":"m"}` + "\n"
+	if err := os.WriteFile(s.Path("20260101-000001"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := s.Load("20260101-000001"); err == nil ||
+		!strings.Contains(err.Error(), "claims to be") {
+		t.Fatalf("Load() = %v, want the mismatch refused", err)
+	}
+}
+
+func TestEnsureDirReplacesAHollowSelfIgnore(t *testing.T) {
+	s := store(t)
+	// A repository can ship its own .metron/.gitignore. An empty one would keep
+	// transcripts git-visible, so `git add -A` would sweep every file the model
+	// read into a commit.
+	if err := os.MkdirAll(filepath.Join(s.Root, Dir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(s.Root, Dir, ".gitignore")
+	if err := os.WriteFile(marker, []byte("# nothing ignored\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.Save(meta("20260101-000001"), nil); err != nil {
+		t.Fatal(err)
+	}
+
+	b, err := os.ReadFile(marker)
+	if err != nil || strings.TrimSpace(string(b)) != "*" {
+		t.Fatalf(".gitignore = %q, %v, want it replaced with a real self-ignore", b, err)
+	}
+}
+
+func fileExistsAt(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
