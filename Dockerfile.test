@@ -5,7 +5,7 @@
 # build tag can exercise the tools against the real thing instead of shims.
 # Many developer machines (macOS in particular, which ships BSD ctags and no
 # ripgrep) cannot run those tests natively.
-FROM golang:1.26-alpine
+FROM golang:1.27-alpine
 
 # ctags in Alpine is Universal Ctags; build-base supplies the C toolchain the
 # race detector needs under musl.
