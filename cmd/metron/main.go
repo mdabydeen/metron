@@ -94,7 +94,11 @@ func runMain(args []string, in io.Reader, out, errOut io.Writer) int {
 		return 0
 	}
 
-	cfg, path, err := config.Load()
+	// Resolve the project once and use it for both configuration and tools.
+	// Otherwise a launch from pkg/deep would operate on the repository root but
+	// silently ignore the .metron.json stored there.
+	projectRoot := tools.NewEnv(tools.DefaultBudgets()).Root
+	cfg, path, err := config.LoadFrom(projectRoot)
 	if err != nil {
 		fmt.Fprintf(errOut, "\033[31mconfig error: %v\033[0m\n", err)
 		return 1
@@ -124,7 +128,7 @@ func runMain(args []string, in io.Reader, out, errOut io.Writer) int {
 
 	// One Env, shared by the agent and by /tags, so both agree on which
 	// project they are pointed at.
-	env := tools.NewEnv(tools.Budgets{
+	env := tools.Env{Root: projectRoot, Budgets: tools.Budgets{
 		MaxSliceLines:    cfg.MaxSliceLines,
 		MaxLineChars:     cfg.MaxLineChars,
 		SearchMaxMatches: cfg.SearchMaxMatches,
@@ -133,7 +137,7 @@ func runMain(args []string, in io.Reader, out, errOut io.Writer) int {
 
 		CommandTimeout:        time.Duration(cfg.CommandTimeoutSeconds) * time.Second,
 		MaxCommandOutputBytes: cfg.MaxCommandOutputBytes,
-	})
+	}}
 	env.Allowed = tools.ParseAllowlist(cfg.AllowedCommands)
 	opts := agent.Options{
 		MaxTurns:           cfg.MaxTurns,

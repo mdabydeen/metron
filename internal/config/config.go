@@ -92,16 +92,28 @@ func Defaults() Config {
 	}
 }
 
-// ProjectFile is the config file metron looks for in the working directory.
+// ProjectFile is the per-project configuration filename.
 const ProjectFile = ".metron.json"
 
 // Search returns the config file paths metron consults, highest priority
 // first. An explicit path (from METRON_CONFIG) short-circuits the search.
 func Search() []string {
+	return SearchFrom("")
+}
+
+// SearchFrom is Search with an explicit project root. It is used by the CLI
+// after it has resolved the enclosing repository, so starting metron in a
+// nested package still finds the configuration stored at the repository root.
+// An empty projectRoot preserves Search's current-working-directory behaviour.
+func SearchFrom(projectRoot string) []string {
 	if explicit := os.Getenv("METRON_CONFIG"); explicit != "" {
 		return []string{explicit}
 	}
-	paths := []string{ProjectFile}
+	projectFile := ProjectFile
+	if projectRoot != "" {
+		projectFile = filepath.Join(projectRoot, ProjectFile)
+	}
+	paths := []string{projectFile}
 	dir := os.Getenv("XDG_CONFIG_HOME")
 	if dir == "" {
 		if home, err := os.UserHomeDir(); err == nil {
@@ -122,10 +134,17 @@ func Search() []string {
 // silent fallback -- a typo in a config file should not quietly change how the
 // agent behaves.
 func Load() (Config, string, error) {
+	return LoadFrom("")
+}
+
+// LoadFrom resolves configuration like Load, but reads the project file from
+// projectRoot. This keeps the package useful to callers that want cwd-based
+// lookup while allowing the CLI to use the same repository root as its tools.
+func LoadFrom(projectRoot string) (Config, string, error) {
 	cfg := Defaults()
 
 	var used string
-	for _, path := range Search() {
+	for _, path := range SearchFrom(projectRoot) {
 		data, err := os.ReadFile(path)
 		if errors.Is(err, os.ErrNotExist) {
 			continue

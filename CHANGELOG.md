@@ -54,6 +54,8 @@ is pre-1.0, the minor version is bumped for breaking changes to configuration or
 
 ### Fixed
 
+- Starting metron in a repository subdirectory now loads `.metron.json` from the
+  repository root, matching the project root used by every tool.
 - `search_text` no longer lets a pattern beginning with a dash be parsed by ripgrep as a
   flag. A search for `--files` listed every file in the repository and applied no match
   budget at all; the pattern now follows a `--` separator. `list_files` passes its glob as

@@ -167,7 +167,7 @@ JSON, and every key is optional — anything you leave out keeps its default. me
 first file it finds:
 
 1. `$METRON_CONFIG`, if set (an explicit path short-circuits the search)
-2. `./.metron.json` — per-project, next to the code you are working on
+2. `<repository-root>/.metron.json` — per-project, found even when metron starts in a subdirectory
 3. `$XDG_CONFIG_HOME/metron/config.json`, else `~/.config/metron/config.json`
 
 Copy [`metron.example.json`](metron.example.json) to get started; it lists every key at its

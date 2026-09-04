@@ -345,6 +345,37 @@ func TestRunMainStartsAndExitsCleanly(t *testing.T) {
 	}
 }
 
+func TestRunMainLoadsProjectConfigFromNestedDirectory(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	writeGitRepoForTest(t)
+	if err := os.WriteFile(filepath.Join(root, config.ProjectFile), []byte(`{"model":"root-model"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	nested := filepath.Join(root, "pkg", "deep")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(nested)
+	t.Setenv("METRON_CONFIG", "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("OLLAMA_HOST", "")
+	t.Setenv("OLLAMA_MODEL", "")
+
+	var out, errOut bytes.Buffer
+	code := runMain(nil, strings.NewReader("exit\n"), &out, &errOut)
+
+	if code != 0 {
+		t.Fatalf("runMain() = %d, want 0 (stderr: %q)", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "root-model") {
+		t.Fatalf("stdout = %q, want repository-root config model", out.String())
+	}
+	if !strings.Contains(out.String(), filepath.Join(root, config.ProjectFile)) {
+		t.Fatalf("stdout = %q, want repository-root config path", out.String())
+	}
+}
+
 func TestRunMainReportsBadConfig(t *testing.T) {
 	dir := t.TempDir()
 	bad := filepath.Join(dir, "config.json")
