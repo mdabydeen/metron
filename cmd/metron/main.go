@@ -57,6 +57,7 @@ func main() {
 type flags struct {
 	prompt      string
 	yes         bool
+	doctor      bool
 	showVersion bool
 }
 
@@ -68,6 +69,7 @@ func parseFlags(args []string, errOut io.Writer) (f flags, code int, ok bool) {
 	fs.StringVar(&f.prompt, "p", "", "run one request non-interactively and exit")
 	fs.StringVar(&f.prompt, "prompt", "", "run one request non-interactively and exit")
 	fs.BoolVar(&f.yes, "yes", false, "apply patches without asking (required by -p to edit files)")
+	fs.BoolVar(&f.doctor, "doctor", false, "check configuration, dependencies, endpoint and model, then exit")
 	fs.BoolVar(&f.showVersion, "version", false, "print the version and exit")
 	fs.Usage = func() {
 		fmt.Fprintf(errOut, "usage: metron [flags]\n\nRun from the root of the repository you want to work on.\n\n")
@@ -139,6 +141,9 @@ func runMain(args []string, in io.Reader, out, errOut io.Writer) int {
 		MaxCommandOutputBytes: cfg.MaxCommandOutputBytes,
 	}}
 	env.Allowed = tools.ParseAllowlist(cfg.AllowedCommands)
+	if f.doctor {
+		return runDoctor(context.Background(), out, cfg, path, env, client)
+	}
 	opts := agent.Options{
 		MaxTurns:           cfg.MaxTurns,
 		CompactThreshold:   cfg.CompactThreshold,
@@ -166,6 +171,52 @@ func runMain(args []string, in io.Reader, out, errOut io.Writer) int {
 	}
 
 	run(context.Background(), scanner, out, cfg, path, env, bot, streamed)
+	return 0
+}
+
+type modelProber interface {
+	Probe(context.Context) (ollama.ModelInfo, error)
+}
+
+// runDoctor checks everything needed for a useful first run without loading a
+// model or changing the project. Its exit code makes it usable as a setup and
+// CI health check, while the line-oriented output stays easy to diagnose.
+func runDoctor(ctx context.Context, out io.Writer, cfg config.Config, cfgPath string, env tools.Env, prober modelProber) int {
+	if cfgPath == "" {
+		cfgPath = "built-in defaults"
+	}
+	fmt.Fprintf(out, "project: ok (%s)\n", env.Root)
+	fmt.Fprintf(out, "config: ok (%s)\n", cfgPath)
+
+	ready := true
+	warnings := env.Preflight()
+	if len(warnings) == 0 {
+		fmt.Fprintln(out, "tools: ok")
+	} else {
+		ready = false
+		for _, warning := range warnings {
+			fmt.Fprintf(out, "tools: fail (%s)\n", warning)
+		}
+	}
+
+	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	info, err := prober.Probe(probeCtx)
+	if err != nil {
+		ready = false
+		fmt.Fprintf(out, "ollama: fail (%v)\n", err)
+	} else if !info.Supports("tools") {
+		ready = false
+		fmt.Fprintf(out, "ollama: fail (model %q does not advertise tool support)\n", cfg.Model)
+	} else {
+		fmt.Fprintf(out, "ollama: ok (%s, model %s supports tools)\n", cfg.Endpoint, cfg.Model)
+	}
+
+	if !ready {
+		fmt.Fprintln(out, "doctor: issues found")
+		return 1
+	}
+	fmt.Fprintln(out, "doctor: ready")
 	return 0
 }
 

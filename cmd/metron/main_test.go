@@ -50,6 +50,13 @@ type fakeStepper struct {
 	schemaBytes int
 }
 
+type fakeProber struct {
+	info ollama.ModelInfo
+	err  error
+}
+
+func (p fakeProber) Probe(context.Context) (ollama.ModelInfo, error) { return p.info, p.err }
+
 func (f *fakeStepper) Step(ctx context.Context, userPrompt string) (string, error) {
 	f.prompts = append(f.prompts, userPrompt)
 	if f.err != nil {
@@ -750,6 +757,7 @@ func TestParseFlags(t *testing.T) {
 		{"long prompt", []string{"--prompt", "fix it"}, flags{prompt: "fix it"}, true, 0},
 		{"yes", []string{"--yes"}, flags{yes: true}, true, 0},
 		{"version", []string{"--version"}, flags{showVersion: true}, true, 0},
+		{"doctor", []string{"--doctor"}, flags{doctor: true}, true, 0},
 		{"help stops without an error", []string{"-h"}, flags{}, false, 0},
 		{"unknown flag is an error", []string{"--nope"}, flags{}, false, 2},
 	}
@@ -771,10 +779,90 @@ func TestParseFlagsUsageNamesTheFlags(t *testing.T) {
 	var errOut bytes.Buffer
 	parseFlags([]string{"-h"}, &errOut)
 
-	for _, want := range []string{"usage: metron", "-p", "-yes", "-version"} {
+	for _, want := range []string{"usage: metron", "-p", "-yes", "-doctor", "-version"} {
 		if !strings.Contains(errOut.String(), want) {
 			t.Errorf("usage = %q, missing %q", errOut.String(), want)
 		}
+	}
+}
+
+func TestRunDoctorReportsReadySetup(t *testing.T) {
+	bin := t.TempDir()
+	for name, body := range map[string]string{
+		"rg":    "exit 0\n",
+		"ctags": "echo 'Universal Ctags 6.2'\n",
+		"git":   "echo true\n",
+	} {
+		path := filepath.Join(bin, name)
+		if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", bin)
+	cfg := cfgFor("tool-model")
+	var out bytes.Buffer
+
+	code := runDoctor(context.Background(), &out, cfg, "/tmp/metron.json", testEnv(t),
+		fakeProber{info: ollama.ModelInfo{Capabilities: []string{"completion", "tools"}}})
+
+	if code != 0 {
+		t.Fatalf("runDoctor() = %d, want 0; output: %s", code, out.String())
+	}
+	for _, want := range []string{"project: ok", "config: ok (/tmp/metron.json)", "tools: ok", "model tool-model supports tools", "doctor: ready"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("output = %q, missing %q", out.String(), want)
+		}
+	}
+}
+
+func TestRunDoctorReportsEveryIssue(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	var out bytes.Buffer
+
+	code := runDoctor(context.Background(), &out, cfgFor("plain-model"), "", testEnv(t),
+		fakeProber{info: ollama.ModelInfo{Capabilities: []string{"completion"}}})
+
+	if code != 1 {
+		t.Fatalf("runDoctor() = %d, want 1; output: %s", code, out.String())
+	}
+	for _, want := range []string{"config: ok (built-in defaults)", "tools: fail", "does not advertise tool support", "doctor: issues found"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("output = %q, missing %q", out.String(), want)
+		}
+	}
+}
+
+func TestRunDoctorReportsProbeFailure(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	var out bytes.Buffer
+	code := runDoctor(context.Background(), &out, cfgFor("m"), "", testEnv(t),
+		fakeProber{err: errors.New("server offline")})
+	if code != 1 || !strings.Contains(out.String(), "ollama: fail (server offline)") {
+		t.Fatalf("runDoctor() = %d, output %q", code, out.String())
+	}
+}
+
+func TestRunMainDoctorUsesOllamaModelProbe(t *testing.T) {
+	t.Chdir(t.TempDir())
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/show" {
+			t.Errorf("path = %q, want /api/show", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"capabilities":["tools"]}`))
+	}))
+	defer srv.Close()
+	t.Setenv("METRON_CONFIG", "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("OLLAMA_HOST", srv.URL+"/api/chat")
+	t.Setenv("OLLAMA_MODEL", "doctor-model")
+
+	var out, errOut bytes.Buffer
+	code := runMain([]string{"--doctor"}, strings.NewReader(""), &out, &errOut)
+	if code != 1 {
+		t.Fatalf("runMain(--doctor) = %d, want 1; stdout: %s; stderr: %s", code, out.String(), errOut.String())
+	}
+	if !strings.Contains(out.String(), "ollama: ok") || !strings.Contains(out.String(), "doctor-model") {
+		t.Fatalf("stdout = %q, want successful model probe", out.String())
 	}
 }
 

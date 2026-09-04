@@ -81,6 +81,11 @@ go run ./cmd/metron   # run without building
 `go install` does not stamp a version, so `metron --version` reports `dev` for those builds.
 Released binaries and `make build` both carry the real one.
 
+After installation, run `metron --doctor`. It checks the resolved project and
+configuration, required local binaries, Ollama connectivity, the configured model, and
+whether that model advertises tool support. It performs no inference and exits non-zero
+when the setup is incomplete, so it is also suitable for bootstrap scripts.
+
 ## Usage
 
 Run metron anywhere inside the repository you want it to work on. It finds the enclosing
@@ -122,6 +127,7 @@ written to disk.
 | --- | --- |
 | `-p`, `--prompt` | run one request non-interactively and exit |
 | `--yes` | apply patches without asking (required by `-p` to edit files) |
+| `--doctor` | check dependencies, Ollama connectivity and model tool support, then exit |
 | `--version` | print the version and exit |
 | `-h` | list the flags |
 

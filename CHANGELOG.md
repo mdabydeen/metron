@@ -10,6 +10,8 @@ is pre-1.0, the minor version is bumped for breaking changes to configuration or
 
 ### Added
 
+- `metron --doctor` performs a side-effect-free readiness check of configuration,
+  local tool dependencies, Ollama connectivity, and model tool support.
 - `go install github.com/mdabydeen/metron/cmd/metron@latest` now works: the module has a
   resolvable path and the command lives under `cmd/metron`.
 - Homebrew installs via a cask rather than a formula, following GoReleaser's deprecation of
