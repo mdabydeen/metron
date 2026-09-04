@@ -1,0 +1,22 @@
+# Test environment for metron.
+#
+# The point of this image is that it has the three external binaries metron
+# shells out to -- ripgrep, Universal Ctags and git -- so the `integration`
+# build tag can exercise the tools against the real thing instead of shims.
+# Many developer machines (macOS in particular, which ships BSD ctags and no
+# ripgrep) cannot run those tests natively.
+FROM golang:1.27-alpine
+
+# ctags in Alpine is Universal Ctags; build-base supplies the C toolchain the
+# race detector needs under musl.
+RUN apk add --no-cache git ripgrep ctags build-base
+
+# Tests run unprivileged on purpose: several cases assert on permission
+# failures, and root would bypass them and silently skip.
+RUN adduser -D -h /home/metron metron
+WORKDIR /src
+COPY --chown=metron:metron . .
+USER metron
+ENV GOCACHE=/tmp/gocache GOFLAGS=-buildvcs=false
+
+CMD ["go", "test", "-tags=integration", "./..."]

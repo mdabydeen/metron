@@ -1,0 +1,50 @@
+name: Feature request
+description: Propose something metron should do
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        metron is small on purpose. The defining constraint is that the model never reads a
+        whole file, and every look at your code goes through a narrow, budgeted tool. The
+        questions below are the ones that actually decide whether a feature lands — see
+        [CONTRIBUTING.md](../blob/main/CONTRIBUTING.md).
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do that metron makes hard or impossible today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you have in mind
+    validations:
+      required: true
+
+  - type: textarea
+    id: budget
+    attributes:
+      label: What bounds its output
+      description: >
+        If this adds or widens a tool: what stops it returning unbounded text into the
+        context window, and what should the default budget be? "The output is usually
+        small" is not a bound.
+    validations:
+      required: true
+
+  - type: textarea
+    id: cost
+    attributes:
+      label: What it costs per turn
+      description: >
+        Roughly how many extra prompt tokens does this spend, and on which turns? A feature
+        that costs tokens on every call needs to earn them.
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered

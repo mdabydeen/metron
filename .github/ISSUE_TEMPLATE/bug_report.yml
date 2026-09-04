@@ -1,0 +1,71 @@
+name: Bug report
+description: Something metron does wrong
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing: if a tool is unavailable rather than misbehaving, the startup
+        warnings usually say why. On macOS, `find_symbol` failing is almost always the
+        system BSD `ctags` — `brew install universal-ctags` and put it first on `PATH`.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you asked metron to do, and what it did instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Output of `/config`
+      description: >
+        Run `/config` in the REPL and paste the whole thing. It reports the effective
+        settings and which file they came from.
+      render: json
+    validations:
+      required: true
+
+  - type: textarea
+    id: preflight
+    attributes:
+      label: Startup warnings
+      description: >
+        Any `warning:` lines metron printed at startup. Paste "none" if there were none.
+      render: text
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: metron version
+      description: Output of `metron --version`.
+      placeholder: v0.1.0
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: OS and architecture
+      placeholder: macOS 15.6 arm64
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: >
+        A transcript is the single most useful thing you can attach. Redact anything from
+        your codebase you would rather not publish.
