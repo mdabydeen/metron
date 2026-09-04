@@ -1,0 +1,1 @@
+Length panics when it is given a nil Node. Add a nil guard so that it returns 0 instead.

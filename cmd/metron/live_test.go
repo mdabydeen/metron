@@ -23,10 +23,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mdabydeen/metron/internal/agent"
+	"github.com/mdabydeen/metron/agent"
 	"github.com/mdabydeen/metron/internal/config"
-	"github.com/mdabydeen/metron/internal/ollama"
-	"github.com/mdabydeen/metron/internal/tools"
+	"github.com/mdabydeen/metron/llm"
+	"github.com/mdabydeen/metron/ollama"
+	"github.com/mdabydeen/metron/tools"
 )
 
 // liveModel returns a model on the local server that advertises tool support.
@@ -78,10 +79,10 @@ type countingChatter struct {
 	inner     agent.Chatter
 	calls     int
 	toolNames []string
-	usage     ollama.Usage
+	usage     llm.Usage
 }
 
-func (c *countingChatter) Chat(ctx context.Context, msgs []ollama.Message, tls []ollama.Tool) (*ollama.Reply, error) {
+func (c *countingChatter) Chat(ctx context.Context, msgs []llm.Message, tls []llm.Tool) (*llm.Reply, error) {
 	c.calls++
 	reply, err := c.inner.Chat(ctx, msgs, tls)
 	if err == nil {
@@ -116,7 +117,7 @@ func liveSetup(t *testing.T) (*countingChatter, *agent.Agent, config.Config) {
 	cfg.Model = liveModel(t, cfg.Endpoint)
 	t.Logf("live model: %s at %s", cfg.Model, cfg.Endpoint)
 
-	client := ollama.NewClient(cfg.Endpoint, cfg.Model, ollama.Options{
+	client := ollama.NewClient(cfg.Endpoint, cfg.Model, llm.Options{
 		Temperature: cfg.Temperature,
 		TopP:        cfg.TopP,
 		NumCtx:      cfg.NumCtx,

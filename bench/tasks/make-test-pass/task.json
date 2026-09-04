@@ -1,0 +1,12 @@
+{
+  "name": "make-test-pass",
+  "tags": [
+    "edit",
+    "run-command"
+  ],
+  "timeout_seconds": 420,
+  "allowed_commands": [
+    "go test",
+    "go build"
+  ]
+}

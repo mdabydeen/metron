@@ -179,6 +179,9 @@ cp metron.example.json .metron.json
 
 | Key | Default | Meaning |
 | --- | --- | --- |
+| `profile` | `"standard"` | budget preset: `tight`, `standard` or `roomy` |
+| `provider` | `"ollama"` | wire format: `ollama` or `openai` |
+| `api_key_env` | `""` | environment variable holding the API key, if the endpoint wants one |
 | `endpoint` | `http://localhost:11434/api/chat` | Ollama chat endpoint, path included |
 | `model` | `qwen2.5-coder:32b` | model name to request |
 | `timeout_seconds` | `180` | seconds of *silence* before a model call is abandoned |
@@ -188,6 +191,8 @@ cp metron.example.json .metron.json
 | `num_ctx` | `16384` | context window requested from Ollama |
 | `max_turns` | `10` | model round-trips allowed in one user turn |
 | `compact_threshold_bytes` | `400` | tool output above this size is purged after the turn |
+| `max_prompt_tokens` | `0` | ceiling on prompt tokens for one turn; `0` means none |
+| `repo_map_tokens` | `0` | tokens for a project map injected once per session; `0` disables it |
 | `max_history_messages` | `60` | messages kept after a turn, excluding the system prompt |
 | `max_slice_lines` | `120` | widest span `view_slice` will read |
 | `max_line_chars` | `500` | longest single line `view_slice` will emit |
@@ -196,10 +201,22 @@ cp metron.example.json .metron.json
 | `search_max_per_file` | `2` | `search_text` results per file |
 | `list_max_entries` | `60` | paths `list_files` will return |
 | `disabled_tools` | `[]` | tool names to withhold from the model entirely |
+| `save_sessions` | `false` | write each conversation to `.metron/sessions` |
 | `edit_format` | `"diff"` | how edits are expressed: `diff` (`apply_patch`) or `search_replace` (`edit_file`) |
 | `allowed_commands` | `[]` | argv prefixes `run_command` may execute; empty withdraws the tool |
 | `command_timeout_seconds` | `120` | wall clock one `run_command` gets |
 | `max_command_output_bytes` | `4000` | combined output `run_command` returns |
+
+**Some settings are not accepted from a project file.** `.metron.json` travels with a
+repository, and it is the highest-priority config file — so a repository you cloned could
+otherwise switch off the approval prompt and switch on `run_command` before the first turn.
+`auto_approve_patches`, `allowed_commands`, `save_sessions`, `provider`, `endpoint`,
+`api_key_env` and `system_prompt_extra` are honoured only from your user-level config or a
+file you name with `METRON_CONFIG` — the last four because a repository that could set them
+would point metron at a server it ran and name an environment variable for metron to send as
+a bearer token. `model` is not on that list: with the endpoint pinned, it can only choose
+among models on your own server. A project file that sets them is
+reported on stderr and ignored.
 
 A file that exists but cannot be read or parsed is a startup error, not a silent fallback —
 including unknown keys, so a typo like `"modle"` is reported instead of ignored. Values are
@@ -323,7 +340,7 @@ and then spends the rest of the turn budget adjusting numbers. `edit_file` asks 
 quote the lines it already read.
 
 ```
-edit_file(path="internal/tools/slice.go",
+edit_file(path="tools/slice.go",
           search="\tif end-start > maxLines {",
           replace="\tif end-start >= maxLines {")
 ```
@@ -338,6 +355,72 @@ An empty `replace` deletes the matched lines; an empty `search` creates the file
 approve a unified diff** — the format exists to make the model's job easier, not yours.
 
 It also needs no `git`, so on a machine without it this is the only working edit path.
+
+### Budgets for a whole turn
+
+Every other budget bounds one tool. `max_prompt_tokens` bounds the turn:
+
+```
+metron > /budget 8000
+Per-turn ceiling set to 8000 prompt tokens.
+```
+
+Enforcement is predictive, and has to be: a server reports `prompt_eval_count` only once it
+has evaluated the prompt, which is *after* the tokens are spent — a ceiling that waited for a
+real number could report an overrun but never prevent one. metron estimates from the size of
+what it is about to send, and corrects that estimate against every count the server does
+report, so it converges on the tokeniser actually in use. `/budget` shows both numbers.
+
+When a turn approaches its ceiling, metron sheds rather than truncates, because cutting a
+turn off mid-thought wastes everything it has done:
+
+1. purge file slices already read — the largest and most re-requestable thing in the history;
+2. drop the oldest exchanges, leaving the note that says a gap is there;
+3. if there is nothing left to shed, stop and say so, with what was learned.
+
+Running out of budget is an outcome, not an error. The exit code stays 0 and the answer
+explains itself.
+
+### Profiles
+
+Eleven numbers is too many to tune blind, so `profile` supplies a starting point — `tight`
+for a 7B on a laptop, `standard`, `roomy` for a 32B with room to spare. Individual settings
+in the same file still win, so a profile is a baseline rather than a lock.
+
+**These are reasoned, not measured.** metron ships a benchmark so that claims like these can
+be checked: run `make bench` against your own model and adjust. Presenting a guess as a
+finding would be exactly the thing this project exists to argue against.
+
+### Sessions
+
+With `save_sessions` on, each conversation is written to `.metron/sessions/<id>.jsonl` as it
+goes, so it survives exiting. `/save` writes one now, `/sessions` lists them, and
+`--resume <id>` or `--resume-last` continues one. The directory contains a `.gitignore` of
+`*`, so it never shows up as untracked in your project.
+
+It is **off by default**: a transcript contains every tool result the model saw, which is the
+contents of every file it read. Transcripts are written `0600`, but they persist. Resuming a
+session whose tree has moved since it was saved prints a warning, because the conversation is
+full of line numbers and quoted code that may no longer be true.
+
+### One-shot JSON
+
+`metron -p "..." --json` prints exactly one object on stdout and nothing else:
+
+```json
+{
+  "answer": "Greet now returns hola.",
+  "ok": true,
+  "tool_calls": 3,
+  "tools": [{"name": "view_slice", "ms": 2}, {"name": "edit_file", "ms": 1}],
+  "usage": {"prompt": 7341, "generated": 511},
+  "files_changed": ["greet.go"]
+}
+```
+
+`files_changed` is derived from `git status`, so it is true whichever edit format was used,
+and true for a file a permitted command wrote as a side effect. A failed run still emits a
+valid object with `"ok": false` and an `error`; the exit code carries the verdict.
 
 ### `run_command(command)`
 
@@ -364,14 +447,23 @@ asked to find out.
 Choose these entries with the care you would give a sudoers file. `"go"` permits
 `go run ./anything`; `"make"` permits whatever the Makefile does. See [SECURITY.md](SECURITY.md).
 
+## Using it as a library
+
+The agent loop is importable — `agent`, `tools`, `llm` and the two providers sit outside
+`internal/`. See [API.md](API.md) for the smallest useful program and, more importantly, for
+what is *not* stable yet and why.
+
 ## Architecture
 
 ```
 cmd/metron/main.go   REPL and commands. No conversation state lives here.
 internal/config      Settings: defaults, JSON file, environment, validation.
-internal/ollama      HTTP client for Ollama's /api/chat, plus the shared wire types.
-internal/agent       The agent loop, the system prompt, tool schemas, compaction.
-internal/tools       The six tools, the project confinement, the dependency check.
+llm                  The provider-neutral vocabulary the loop speaks.
+ollama, openai       The two providers, each translating at its own edge.
+agent                The agent loop, the system prompt, tool schemas, compaction, budgets.
+tools                The seven tools, the project confinement, the dependency check.
+internal/repomap     The ranked project summary injected once per session.
+internal/session     Conversation transcripts as JSONL.
 ```
 
 Seams are interfaces, so each layer can be driven in isolation: `agent.New` takes a `Chatter`
@@ -424,8 +516,8 @@ and small.
 Keep new tools narrow and output-bounded — that constraint is the entire point of this
 codebase. Three edits:
 
-1. Implement it in `internal/tools` as a plain function returning `(string, error)`.
-2. Add its JSON schema to the package-level `toolDefs` slice in `internal/agent/loop.go`.
+1. Implement it in `tools` as a method on `Env`, taking its budget from `Env.Budgets`.
+2. Add its name to `tools.ToolNames`, and its JSON schema to the package-level `toolDefs` map in `agent/loop.go`.
 3. Add a `case` for it in `Agent.dispatch`.
 
 Then extend `TestDispatchRoutesToolsAndReportsErrors` and `TestStepAdvertisesEveryTool`.
@@ -449,7 +541,7 @@ make check    # all of the above
 - **Ollama** is replaced by `httptest` servers that assert on the outgoing request body and
   return scripted replies, including tool calls.
 - **`rg` and `ctags`** are replaced by executable shell-script shims written into a temp
-  directory that becomes the entire `PATH` (see `internal/tools/helpers_test.go`). An empty
+  directory that becomes the entire `PATH` (see `tools/helpers_test.go`). An empty
   shim directory is how the "binary not installed" branches get exercised.
 - **git** is used for real, in throwaway repositories under `t.TempDir()`; those tests skip
   themselves if git is missing.
@@ -517,6 +609,42 @@ That run is also why tool failures are phrased at the model rather than at you. 
 earlier bare `Error: ripgrep error:`, the same model retried `search_text` **eight times** and
 exhausted the turn budget without editing anything. Told plainly that the tool is unavailable
 and not to retry, it tried once, fell back to `view_slice`, and finished the job.
+
+## Benchmark
+
+`make bench` measures metron over ten seeded repair tasks, across the models and edit formats
+in [`bench/matrix.json`](bench/matrix.json), and reports a pass **rate** with median and p95
+prompt tokens. Each task ships a `verify.sh` that judges the repository the model left behind
+and never the answer text, so a confident sentence cannot pass a task; two of the ten
+(`no-such-symbol`, `ambiguous-symbol`) pass only when the model declines to guess. It needs a
+live Ollama server and is deliberately not part of `make check`.
+
+See [bench/README.md](bench/README.md) for the task list, the prompt-token ceiling on
+`large-file-edit`, and how to add a task.
+
+## Why there is no MCP support
+
+metron does not speak the Model Context Protocol, and this is a decision rather
+than a gap.
+
+Every budget in the table at the top of this file is enforced by metron itself:
+`view_slice` refuses a wide range, `search_text` truncates and says so, the whole
+turn is bounded by `max_prompt_tokens`. An MCP server arrives with a tool surface
+metron did not write and cannot bound — schemas of arbitrary size paid for on
+every request, and results of arbitrary size returned into the context window.
+The one guarantee this program makes is the one thing MCP would take away.
+
+That is not an argument that MCP is bad. It is an argument that "connect to
+anything" and "the model never sees more than N tokens" are different products,
+and metron is the second one. If you want the first, [several excellent tools
+exist](https://modelcontextprotocol.io) and you should use one.
+
+The conditions under which this could change: every server's schemas counted and
+shown in `/config`, results clipped through the same byte budgets as native
+tools, servers off by default, and a hard cap on advertised tools. If someone
+wants to build that, the tool advertisement seam in `agent/loop.go` is where it
+would go. Until then, the refusal is a better advertisement for what metron is
+than the feature would be.
 
 ## Limitations
 

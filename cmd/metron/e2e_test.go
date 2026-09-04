@@ -13,10 +13,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mdabydeen/metron/internal/agent"
+	"github.com/mdabydeen/metron/agent"
 	"github.com/mdabydeen/metron/internal/config"
-	"github.com/mdabydeen/metron/internal/ollama"
-	"github.com/mdabydeen/metron/internal/tools"
+	"github.com/mdabydeen/metron/llm"
+	"github.com/mdabydeen/metron/ollama"
+	"github.com/mdabydeen/metron/tools"
 )
 
 // TestEndToEndPatchSession wires the real HTTP client, agent loop and tools
@@ -99,11 +100,11 @@ func TestEndToEndPatchSession(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	bot := agent.New(ollama.NewClient(srv.URL+"/api/chat", "e2e-model", ollama.DefaultOptions()), agent.DefaultOptions())
+	bot := agent.New(ollama.NewClient(srv.URL+"/api/chat", "e2e-model", llm.DefaultOptions()), agent.DefaultOptions())
 	var out bytes.Buffer
 	cfg := config.Defaults()
 	cfg.Model = "e2e-model"
-	run(context.Background(), bufio.NewScanner(strings.NewReader("make Greet say hola\nexit\n")), &out, cfg, "", testEnv(t), bot, false)
+	run(context.Background(), bufio.NewScanner(strings.NewReader("make Greet say hola\nexit\n")), &out, cfg, "", testEnv(t), bot, testRecorder(t), false)
 
 	if turn != len(script) {
 		t.Fatalf("model was called %d times, want %d", turn, len(script))
@@ -191,12 +192,12 @@ func TestEndToEndRunCommandSession(t *testing.T) {
 	env.Allowed = tools.ParseAllowlist([]string{"cat"})
 	opts := agent.DefaultOptions()
 	opts.Env = env
-	bot := agent.New(ollama.NewClient(srv.URL+"/api/chat", "m", ollama.DefaultOptions()), opts)
+	bot := agent.New(ollama.NewClient(srv.URL+"/api/chat", "m", llm.DefaultOptions()), opts)
 
 	var out bytes.Buffer
 	cfg := config.Defaults()
 	run(context.Background(), bufio.NewScanner(strings.NewReader("fix the answer\nexit\n")),
-		&out, cfg, "", env, bot, false)
+		&out, cfg, "", env, bot, testRecorder(t), false)
 
 	if turn != len(script) {
 		t.Fatalf("model called %d times, want %d", turn, len(script))
@@ -259,13 +260,13 @@ func TestEndToEndSearchReplaceSession(t *testing.T) {
 	env.EditFormat = tools.FormatSearchReplace
 	opts := agent.DefaultOptions()
 	opts.Env = env
-	bot := agent.New(ollama.NewClient(srv.URL+"/api/chat", "m", ollama.DefaultOptions()), opts)
+	bot := agent.New(ollama.NewClient(srv.URL+"/api/chat", "m", llm.DefaultOptions()), opts)
 
 	var out bytes.Buffer
 	cfg := config.Defaults()
 	cfg.EditFormat = tools.FormatSearchReplace
 	run(context.Background(), bufio.NewScanner(strings.NewReader("make Greet say hola\nexit\n")),
-		&out, cfg, "", env, bot, false)
+		&out, cfg, "", env, bot, testRecorder(t), false)
 
 	if turn != len(script) {
 		t.Fatalf("model called %d times, want %d", turn, len(script))

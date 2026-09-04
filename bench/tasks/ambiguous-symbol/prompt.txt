@@ -1,0 +1,1 @@
+Three packages each define a function named Handle. Change only the one in package beta so that it returns "beta-v2". Leave the other two exactly as they are.

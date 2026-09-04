@@ -1,0 +1,8 @@
+{
+  "name": "unicode-source",
+  "tags": [
+    "encoding",
+    "byte-exact"
+  ],
+  "timeout_seconds": 300
+}

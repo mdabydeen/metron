@@ -1,0 +1,8 @@
+{
+  "name": "find-the-caller",
+  "tags": [
+    "navigation",
+    "read-mostly"
+  ],
+  "timeout_seconds": 300
+}

@@ -1,0 +1,1 @@
+In greeting.go, change Greet so that it returns the Farewell constant instead of its string literal. Do not change anything else in the file.

@@ -1,0 +1,1 @@
+Add an int field named Retries to Config, with the JSON tag "retries", and default it to 3 in Default().

@@ -1,0 +1,12 @@
+{
+  "endpoint": "http://localhost:11434/api/chat",
+  "models": [
+    "qwen2.5-coder:7b",
+    "qwen2.5-coder:32b"
+  ],
+  "edit_formats": [
+    "diff",
+    "search_replace"
+  ],
+  "repetitions": 3
+}

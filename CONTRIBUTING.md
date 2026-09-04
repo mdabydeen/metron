@@ -25,7 +25,7 @@ These hold for every change:
    is a bug in this codebase. Add the budget to `internal/config`, thread it through
    `agent.Options`, and document it in the README's budget table.
 4. **Tool failures are written at the model, not at the user.** See
-   `internal/tools/missing.go`: say what broke, say not to retry, and name the alternative.
+   `tools/missing.go`: say what broke, say not to retry, and name the alternative.
    This exists because a vague error once made a live model retry `search_text` eight times
    and burn the whole turn budget.
 5. **No runtime dependencies without a good reason.** `go.mod` has no `require` block, and
@@ -58,7 +58,7 @@ On macOS, note that the system `ctags` is BSD ctags and does **not** work —
 
 **Hermetic** is what CI gates on and what you should be running constantly. External
 binaries are faked by writing executable shell scripts into a temp directory that becomes
-the *entire* `PATH` — see `shimDir` in `internal/tools/helpers_test.go`. An empty shim
+the *entire* `PATH` — see `shimDir` in `tools/helpers_test.go`. An empty shim
 directory is how the "binary not installed" branches get covered. Ollama is faked with
 `httptest` servers that assert on the request body and return scripted replies.
 
@@ -79,9 +79,9 @@ paths.
 Tools are the part of metron most likely to attract contributions, and the part where the
 constraint matters most. The mechanical steps:
 
-1. Implement it in `internal/tools`, taking its budget as a parameter.
+1. Implement it in `tools`, taking its budget as a parameter.
 2. Add the budget to `config.Config`, `config.Defaults()` and `Config.Validate()`.
-3. Add its JSON schema to the package-level `toolDefs` in `internal/agent/loop.go`.
+3. Add its JSON schema to the package-level `toolDefs` in `agent/loop.go`.
 4. Add a case to `dispatch`.
 5. Extend `TestDispatchRoutesToolsAndReportsErrors` and the tool-advertisement test.
 6. Update the README budget table, the tool reference section, and `CLAUDE.md`.

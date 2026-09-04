@@ -8,23 +8,31 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"time"
 
-	"github.com/mdabydeen/metron/internal/agent"
+	"github.com/mdabydeen/metron/agent"
 	"github.com/mdabydeen/metron/internal/config"
-	"github.com/mdabydeen/metron/internal/ollama"
-	"github.com/mdabydeen/metron/internal/tools"
+	"github.com/mdabydeen/metron/internal/session"
+	"github.com/mdabydeen/metron/llm"
+	"github.com/mdabydeen/metron/ollama"
+	"github.com/mdabydeen/metron/openai"
+	"github.com/mdabydeen/metron/tools"
 )
 
 const helpText = `Commands:
   /help    show this message
   /config  show the active settings and where they came from
   /reset   clear the conversation history (keeps the system prompt)
+  /save    write the conversation to disk now
+  /sessions list saved sessions and how to resume one
   /history show how much conversation is being carried
-  /tags    rebuild the ctags symbol index for the current directory
+  /budget  show, set (/budget 8000) or lift (/budget off) the per-turn token ceiling
+  /tags    rebuild the symbol index for the current directory
   /exit    quit (also: exit, quit, Ctrl-D)
 
 Anything else is sent to the model. It can only see your code through
@@ -38,8 +46,14 @@ type stepper interface {
 	Step(ctx context.Context, userPrompt string) (string, error)
 	Reset()
 	HistorySize() (messages, bytes int)
-	LastUsage() (ollama.Usage, int)
+	LastUsage() (llm.Usage, int)
+	LastTools() []agent.ToolRun
+	SetMaxPromptTokens(n int)
+	MaxPromptTokens() int
+	EstimatedPromptTokens() int
 	AdvertisedTools() (names []string, schemaBytes int)
+	Messages() []llm.Message
+	Restore(messages []llm.Message)
 }
 
 // exit is indirected so tests can exercise main without killing the process.
@@ -58,6 +72,9 @@ type flags struct {
 	prompt      string
 	yes         bool
 	showVersion bool
+	asJSON      bool
+	resume      string
+	resumeLast  bool
 }
 
 // parseFlags reads the command line. It reports ok=false when the process
@@ -69,6 +86,9 @@ func parseFlags(args []string, errOut io.Writer) (f flags, code int, ok bool) {
 	fs.StringVar(&f.prompt, "prompt", "", "run one request non-interactively and exit")
 	fs.BoolVar(&f.yes, "yes", false, "apply patches without asking (required by -p to edit files)")
 	fs.BoolVar(&f.showVersion, "version", false, "print the version and exit")
+	fs.BoolVar(&f.asJSON, "json", false, "with -p, print one JSON object describing the run")
+	fs.StringVar(&f.resume, "resume", "", "resume a saved session by id")
+	fs.BoolVar(&f.resumeLast, "resume-last", false, "resume the most recent saved session")
 	fs.Usage = func() {
 		fmt.Fprintf(errOut, "usage: metron [flags]\n\nRun from the root of the repository you want to work on.\n\n")
 		fs.PrintDefaults()
@@ -94,13 +114,19 @@ func runMain(args []string, in io.Reader, out, errOut io.Writer) int {
 		return 0
 	}
 
-	cfg, path, err := config.Load()
+	cfg, path, configWarnings, err := config.Load()
+	for _, w := range configWarnings {
+		// Loud, and on stderr so it survives -p piping: this is the operator
+		// finding out that a repository tried to grant itself permissions.
+		fmt.Fprintf(errOut, "\033[1;33mwarning: %s\033[0m\n", w)
+	}
 	if err != nil {
 		fmt.Fprintf(errOut, "\033[31mconfig error: %v\033[0m\n", err)
 		return 1
 	}
 
-	clientOpts := ollama.Options{
+	clientOpts := llm.Options{
+		APIKey:      cfg.APIKey(),
 		Temperature: cfg.Temperature,
 		TopP:        cfg.TopP,
 		NumCtx:      cfg.NumCtx,
@@ -111,11 +137,14 @@ func runMain(args []string, in io.Reader, out, errOut io.Writer) int {
 	// streams; there is no reader watching it arrive.
 	streamed := cfg.Stream && f.prompt == ""
 	if streamed {
-		clientOpts.Sink = out
+		clientOpts.Sink = safeWriter{out}
 	} else {
 		clientOpts.Stream = false
 	}
-	client := ollama.NewClient(cfg.Endpoint, cfg.Model, clientOpts)
+	if warn := remoteEndpointWarning(cfg.Endpoint); warn != "" {
+		fmt.Fprintf(errOut, "\033[1;33mwarning: %s\033[0m\n", warn)
+	}
+	client := newProvider(cfg, clientOpts)
 
 	// One scanner serves both the REPL and the patch prompt. Two would race for
 	// the same stdin and the second would lose whatever the first had buffered.
@@ -140,9 +169,19 @@ func runMain(args []string, in io.Reader, out, errOut io.Writer) int {
 		MaxTurns:           cfg.MaxTurns,
 		CompactThreshold:   cfg.CompactThreshold,
 		MaxHistoryMessages: cfg.MaxHistoryMessages,
+		RepoMapTokens:      cfg.RepoMapTokens,
+		MaxPromptTokens:    cfg.MaxPromptTokens,
+		SystemPromptExtra:  cfg.SystemPromptExtra,
 		Env:                env,
 		DisabledTools:      cfg.DisabledTools,
 		Progress:           out,
+	}
+	// One-shot mode owns stdout: it prints an answer, or a single JSON object,
+	// and nothing else. Progress notices therefore go to stderr whatever the
+	// approval setting is -- with --yes they used to land on stdout and corrupt
+	// exactly the output a script was reading.
+	if f.prompt != "" {
+		opts.Progress = errOut
 	}
 	autoApprove := cfg.AutoApprovePatches || f.yes
 	switch {
@@ -152,38 +191,71 @@ func runMain(args []string, in io.Reader, out, errOut io.Writer) int {
 		// Nobody is at the keyboard to answer, so fail closed rather than
 		// block forever or edit the tree unattended.
 		opts.Approve = func(string, string) bool { return false }
-		opts.Progress = errOut
 	default:
 		opts.Approve = func(kind, preview string) bool { return approve(out, scanner, kind, preview) }
 	}
 	bot := agent.New(client, opts)
 
-	if f.prompt != "" {
-		return oneShot(context.Background(), out, errOut, env, bot, f.prompt)
+	store := session.Store{Root: env.Root}
+	sess := newRecorder(store, cfg, errOut)
+	if id, err := resumeTarget(store, f); err != nil {
+		fmt.Fprintf(errOut, "\033[31m%v\033[0m\n", err)
+		return 1
+	} else if id != "" {
+		if err := sess.resume(id, bot, out); err != nil {
+			fmt.Fprintf(errOut, "\033[31m%v\033[0m\n", err)
+			return 1
+		}
 	}
 
-	run(context.Background(), scanner, out, cfg, path, env, bot, streamed)
+	if f.prompt != "" {
+		return oneShot(context.Background(), out, errOut, env, bot, sess, f)
+	}
+
+	run(context.Background(), scanner, out, cfg, path, env, bot, sess, streamed)
 	return 0
 }
 
-// oneShot runs a single request and prints only the answer on stdout, so
-// `metron -p ... 2>/dev/null` is pipeable. Progress and warnings go to stderr.
-func oneShot(ctx context.Context, out, errOut io.Writer, env tools.Env, bot stepper, prompt string) int {
-	for _, w := range env.Preflight() {
-		fmt.Fprintf(errOut, "warning: %s\n", w)
+// resumeTarget resolves which session, if any, the flags asked to continue.
+func resumeTarget(store session.Store, f flags) (string, error) {
+	if f.resume != "" {
+		return f.resume, nil
 	}
-	resp, err := step(ctx, bot, prompt)
+	if !f.resumeLast {
+		return "", nil
+	}
+	id, err := store.Latest()
 	if err != nil {
-		fmt.Fprintf(errOut, "error: %v\n", err)
-		return 1
+		return "", fmt.Errorf("list sessions: %w", err)
 	}
-	fmt.Fprintln(out, resp)
-	return 0
+	if id == "" {
+		return "", errors.New("no saved sessions to resume")
+	}
+	return id, nil
 }
 
 // maxInputLine lets a pasted diff or a long request through; the scanner
 // default of 64KB silently ends the session on anything larger.
 const maxInputLine = 1 << 20
+
+// safeWriter escapes control characters in everything written through it.
+//
+// Model output reaches the terminal in three places -- the streamed reply, the
+// final answer, and error text carrying a server's own message -- and all three
+// are attacker-influenced: a comment in a file metron reads can steer what the
+// model writes. Printed raw, that text can clear the screen, overpaint a diff
+// the operator has just approved, retitle the window, or write the clipboard
+// with OSC 52. None of those are things a coding answer needs to do.
+type safeWriter struct{ w io.Writer }
+
+func (s safeWriter) Write(p []byte) (int, error) {
+	if _, err := io.WriteString(s.w, escapeControl(string(p))); err != nil {
+		return 0, err
+	}
+	// Report the caller's length: the escaped form is longer, and a short write
+	// is not what happened.
+	return len(p), nil
+}
 
 // approvalWording is what the prompt says for each kind of effect. A command is
 // not a patch: the operator is being asked to let something execute, not to
@@ -191,6 +263,49 @@ const maxInputLine = 1 << 20
 var approvalWording = map[string]struct{ heading, question, refusal string }{
 	"patch":   {"Proposed patch", "Apply this patch?", "Patch not applied."},
 	"command": {"Proposed command", "Run this command?", "Command not run."},
+}
+
+// previewMaxLines caps what the approval prompt renders. A large diff would
+// otherwise scroll the interesting hunk out of the terminal, leaving only the
+// tail visible above the [y/N] -- which is the same as not being shown it.
+const previewMaxLines = 200
+
+// renderPreview makes model-supplied text safe to print at the approval prompt,
+// and reports how many lines it withheld.
+//
+// The preview is written by the model, and the prompt is the mitigation this
+// program relies on for everything it cannot check itself. Printed raw, a diff
+// can carry escape sequences that clear the screen and redraw a different,
+// innocuous-looking patch, or hide lines with \r and colour tricks -- so the
+// operator approves what they were shown rather than what applies. Control
+// characters are therefore escaped rather than executed.
+func renderPreview(preview string) (body string, hidden int) {
+	lines := strings.Split(strings.TrimRight(preview, "\n"), "\n")
+	if len(lines) > previewMaxLines {
+		hidden = len(lines) - previewMaxLines
+		lines = lines[:previewMaxLines]
+	}
+	for i, line := range lines {
+		lines[i] = escapeControl(line)
+	}
+	return strings.Join(lines, "\n"), hidden
+}
+
+// escapeControl renders C0 and C1 control characters visibly instead of letting
+// the terminal act on them. Tabs survive, since source code is full of them.
+func escapeControl(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r == '\t':
+			b.WriteRune(r)
+		case r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f):
+			fmt.Fprintf(&b, "\\x%02x", r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // approve shows what the model wants to do and waits for a yes. It reads from
@@ -202,7 +317,11 @@ func approve(out io.Writer, scanner *bufio.Scanner, kind, preview string) bool {
 	if !ok {
 		w = struct{ heading, question, refusal string }{"Proposed action", "Allow this?", "Not allowed."}
 	}
-	fmt.Fprintf(out, "\n\033[1m%s:\033[0m\n%s\n", w.heading, strings.TrimRight(preview, "\n"))
+	body, hidden := renderPreview(preview)
+	fmt.Fprintf(out, "\n\033[1m%s:\033[0m\n%s\n", w.heading, body)
+	if hidden > 0 {
+		fmt.Fprintf(out, "\033[2m[%d more lines not shown]\033[0m\n", hidden)
+	}
 	fmt.Fprintf(out, "\033[1;33m%s [y/N] \033[0m", w.question)
 	if !scanner.Scan() {
 		fmt.Fprintf(out, "\nNo input; %s\n", strings.ToLower(w.refusal))
@@ -221,7 +340,7 @@ func approve(out io.Writer, scanner *bufio.Scanner, kind, preview string) bool {
 // streamed tells run that replies already reached out as they arrived, so it
 // must not print them a second time. It is a parameter rather than a read of
 // cfg.Stream because the caller is what actually wires the client's sink.
-func run(ctx context.Context, scanner *bufio.Scanner, out io.Writer, cfg config.Config, cfgPath string, env tools.Env, bot stepper, streamed bool) {
+func run(ctx context.Context, scanner *bufio.Scanner, out io.Writer, cfg config.Config, cfgPath string, env tools.Env, bot stepper, sess *recorder, streamed bool) {
 	fmt.Fprintf(out, "\033[1;36m=== metron (model: %s) ===\033[0m\n", cfg.Model)
 	fmt.Fprintln(out, "Context-disciplined terminal coder. /help for commands, /exit to quit.")
 	if cfgPath != "" {
@@ -240,7 +359,7 @@ func run(ctx context.Context, scanner *bufio.Scanner, out io.Writer, cfg config.
 		if input == "" {
 			continue
 		}
-		if done := command(out, input, cfg, cfgPath, env, bot); done {
+		if done := command(out, input, cfg, cfgPath, env, bot, sess); done {
 			return
 		}
 		if strings.HasPrefix(input, "/") {
@@ -261,7 +380,7 @@ func run(ctx context.Context, scanner *bufio.Scanner, out io.Writer, cfg config.
 			continue
 		}
 		if err != nil {
-			fmt.Fprintf(out, "\033[31mError: %v\033[0m\n", err)
+			fmt.Fprintf(out, "\033[31mError: %s\033[0m\n", escapeControl(err.Error()))
 			continue
 		}
 
@@ -269,9 +388,10 @@ func run(ctx context.Context, scanner *bufio.Scanner, out io.Writer, cfg config.
 			// Already printed as it arrived; reprinting would double it.
 			fmt.Fprintln(out)
 		} else {
-			fmt.Fprintf(out, "\n\033[1m%s\033[0m\n", resp)
+			fmt.Fprintf(out, "\n\033[1m%s\033[0m\n", escapeControl(resp))
 		}
 		reportUsage(out, bot, cfg.NumCtx)
+		sess.save(bot)
 	}
 }
 
@@ -323,7 +443,7 @@ func step(ctx context.Context, bot stepper, input string) (string, error) {
 
 // command handles the REPL's own directives. It reports whether the REPL
 // should stop; non-command input is left for the model.
-func command(out io.Writer, input string, cfg config.Config, cfgPath string, env tools.Env, bot stepper) (quit bool) {
+func command(out io.Writer, input string, cfg config.Config, cfgPath string, env tools.Env, bot stepper, sess *recorder) (quit bool) {
 	switch input {
 	case "exit", "quit", "/exit", "/quit":
 		return true
@@ -334,10 +454,21 @@ func command(out io.Writer, input string, cfg config.Config, cfgPath string, env
 	case "/reset":
 		bot.Reset()
 		fmt.Fprintln(out, "Conversation history cleared.")
+	case "/save":
+		sess.save(bot)
+		if sess.enabled {
+			fmt.Fprintf(out, "Session saved to %s\n", sess.path())
+			break
+		}
+		fmt.Fprintln(out, "Session saving is off (set save_sessions to true).")
+	case "/sessions":
+		listSessions(out, sess)
 	case "/history":
 		msgs, bytes := bot.HistorySize()
 		fmt.Fprintf(out, "history: %d messages, ~%d bytes (budget: %d messages; /reset clears it)\n",
 			msgs, bytes, cfg.MaxHistoryMessages)
+	case "/budget":
+		showBudget(out, bot)
 	case "/tags":
 		if err := env.RebuildTags(); err != nil {
 			fmt.Fprintf(out, "\033[31mError: %v\033[0m\n", err)
@@ -345,6 +476,10 @@ func command(out io.Writer, input string, cfg config.Config, cfgPath string, env
 		}
 		fmt.Fprintln(out, "Symbol index rebuilt.")
 	default:
+		if arg, ok := strings.CutPrefix(input, "/budget "); ok {
+			setBudget(out, bot, strings.TrimSpace(arg))
+			break
+		}
 		if strings.HasPrefix(input, "/") {
 			fmt.Fprintf(out, "Unknown command %q. Try /help.\n", input)
 		}
@@ -382,4 +517,71 @@ func showConfig(out io.Writer, cfg config.Config, cfgPath string, bot stepper) {
 	if err := enc.Encode(cfg); err != nil {
 		fmt.Fprintf(out, "\033[31mError: %v\033[0m\n", err)
 	}
+}
+
+// newProvider builds the client for the configured wire format. The agent takes
+// a Chatter, so which one it is stops mattering past this line.
+func newProvider(cfg config.Config, opts llm.Options) agent.Chatter {
+	if cfg.Provider == config.ProviderOpenAI {
+		return openai.NewClient(cfg.Endpoint, cfg.Model, opts)
+	}
+	return ollama.NewClient(cfg.Endpoint, cfg.Model, opts)
+}
+
+// showBudget reports the per-turn ceiling and what the next call is expected to
+// cost against it. The estimate is shown rather than hidden because the ceiling
+// is enforced against it, not against a number the server has yet to report.
+func showBudget(out io.Writer, bot stepper) {
+	ceiling := bot.MaxPromptTokens()
+	estimate := bot.EstimatedPromptTokens()
+	if ceiling <= 0 {
+		fmt.Fprintf(out, "No per-turn ceiling. The next call is estimated at ~%d prompt tokens.\n", estimate)
+		fmt.Fprintln(out, "Set one with: /budget 8000")
+		return
+	}
+	fmt.Fprintf(out, "Per-turn ceiling: %d prompt tokens. The next call is estimated at ~%d.\n",
+		ceiling, estimate)
+}
+
+// setBudget applies a new ceiling. "off" and "0" both remove it.
+func setBudget(out io.Writer, bot stepper, arg string) {
+	if arg == "off" || arg == "none" {
+		bot.SetMaxPromptTokens(0)
+		fmt.Fprintln(out, "Per-turn ceiling lifted.")
+		return
+	}
+	n, err := strconv.Atoi(arg)
+	if err != nil || n < 0 {
+		fmt.Fprintf(out, "Not a token count: %q. Try /budget 8000, or /budget off.\n", arg)
+		return
+	}
+	bot.SetMaxPromptTokens(n)
+	if n == 0 {
+		fmt.Fprintln(out, "Per-turn ceiling lifted.")
+		return
+	}
+	fmt.Fprintf(out, "Per-turn ceiling set to %d prompt tokens.\n", n)
+}
+
+// remoteEndpointWarning names an endpoint that is not on this machine.
+//
+// metron's documented posture is that the conversation -- which is every file
+// the model reads -- does not leave the machine. That is only true while the
+// endpoint is local, and the endpoint is a setting. Saying so once at startup
+// costs a line and is the difference between a property and an assumption.
+func remoteEndpointWarning(endpoint string) string {
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	host := u.Hostname()
+	if host == "localhost" || host == "::1" || strings.HasPrefix(host, "127.") {
+		return ""
+	}
+	insecure := ""
+	if u.Scheme == "http" {
+		insecure = ", over plain HTTP"
+	}
+	return fmt.Sprintf("the model endpoint is %s%s. Everything metron reads goes there, "+
+		"including any secret in the files it opens", u.Host, insecure)
 }

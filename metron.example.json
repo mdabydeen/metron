@@ -1,6 +1,9 @@
 {
+  "profile": "standard",
+  "provider": "ollama",
   "endpoint": "http://localhost:11434/api/chat",
   "model": "qwen2.5-coder:32b",
+  "api_key_env": "",
   "timeout_seconds": 180,
   "stream": true,
 
@@ -8,9 +11,13 @@
   "top_p": 0.95,
   "num_ctx": 16384,
 
+  "system_prompt_extra": "",
+
   "max_turns": 10,
   "compact_threshold_bytes": 400,
   "max_history_messages": 60,
+  "repo_map_tokens": 0,
+  "max_prompt_tokens": 0,
 
   "max_slice_lines": 120,
   "max_line_chars": 500,
@@ -25,6 +32,8 @@
   "allowed_commands": [],
   "command_timeout_seconds": 120,
   "max_command_output_bytes": 4000,
+
+  "save_sessions": false,
 
   "auto_approve_patches": false
 }
