@@ -231,6 +231,7 @@ func TestValidate(t *testing.T) {
 		{"empty model", func(c *Config) { c.Model = "" }, "model must not be empty"},
 		{"zero timeout", func(c *Config) { c.TimeoutSeconds = 0 }, "timeout_seconds must be > 0"},
 		{"negative num_ctx", func(c *Config) { c.NumCtx = -1 }, "num_ctx must be > 0"},
+		{"zero output budget", func(c *Config) { c.MaxOutputTokens = 0 }, "max_output_tokens must be > 0"},
 		{"zero max turns", func(c *Config) { c.MaxTurns = 0 }, "max_turns must be > 0"},
 		{"zero compaction", func(c *Config) { c.CompactThreshold = 0 }, "compact_threshold_bytes must be > 0"},
 		{"zero history budget", func(c *Config) { c.MaxHistoryMessages = 0 }, "max_history_messages must be > 0"},

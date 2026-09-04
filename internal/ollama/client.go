@@ -75,9 +75,10 @@ type Reply struct {
 // Options carries the per-request generation settings, the idle timeout and
 // where streamed content is echoed.
 type Options struct {
-	Temperature float64
-	TopP        float64
-	NumCtx      int
+	Temperature     float64
+	TopP            float64
+	NumCtx          int
+	MaxOutputTokens int
 
 	// Timeout bounds silence, not total generation. A total deadline is the
 	// wrong shape for a local model: a big one legitimately spends minutes on a
@@ -95,7 +96,7 @@ type Options struct {
 
 // DefaultOptions matches metron's built-in configuration.
 func DefaultOptions() Options {
-	return Options{Temperature: 0.1, TopP: 0.95, NumCtx: 16384, Timeout: 180 * time.Second}
+	return Options{Temperature: 0.1, TopP: 0.95, NumCtx: 16384, MaxOutputTokens: 4096, Timeout: 180 * time.Second}
 }
 
 type Client struct {
@@ -185,6 +186,7 @@ func (c *Client) Chat(ctx context.Context, messages []Message, tools []Tool) (*R
 			"temperature": c.opts.Temperature,
 			"top_p":       c.opts.TopP,
 			"num_ctx":     c.opts.NumCtx,
+			"num_predict": c.opts.MaxOutputTokens,
 		},
 	}
 

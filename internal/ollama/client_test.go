@@ -82,7 +82,7 @@ func TestChatSendsWellFormedRequest(t *testing.T) {
 	if len(gotBody.Tools) != 1 {
 		t.Errorf("tools = %+v, want the tool definitions forwarded", gotBody.Tools)
 	}
-	for key, want := range map[string]float64{"temperature": 0.1, "top_p": 0.95, "num_ctx": 16384} {
+	for key, want := range map[string]float64{"temperature": 0.1, "top_p": 0.95, "num_ctx": 16384, "num_predict": 4096} {
 		if got, ok := gotBody.Options[key].(float64); !ok || got != want {
 			t.Errorf("options[%q] = %v, want %v", key, gotBody.Options[key], want)
 		}
@@ -288,12 +288,12 @@ func TestChatSendsConfiguredSamplingOptions(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	opts := Options{Temperature: 0.7, TopP: 0.5, NumCtx: 4096, Timeout: 5 * time.Second}
+	opts := Options{Temperature: 0.7, TopP: 0.5, NumCtx: 4096, MaxOutputTokens: 512, Timeout: 5 * time.Second}
 	if _, err := NewClient(srv.URL, "m", opts).Chat(context.Background(), nil, nil); err != nil {
 		t.Fatalf("Chat() error = %v", err)
 	}
 
-	for key, want := range map[string]float64{"temperature": 0.7, "top_p": 0.5, "num_ctx": 4096} {
+	for key, want := range map[string]float64{"temperature": 0.7, "top_p": 0.5, "num_ctx": 4096, "num_predict": 512} {
 		if v, _ := got.Options[key].(float64); v != want {
 			t.Errorf("options[%q] = %v, want %v", key, got.Options[key], want)
 		}

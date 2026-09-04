@@ -12,6 +12,8 @@ is pre-1.0, the minor version is bumped for breaking changes to configuration or
 
 - `metron --doctor` performs a side-effect-free readiness check of configuration,
   local tool dependencies, Ollama connectivity, and model tool support.
+- `max_output_tokens` bounds each model generation (Ollama `num_predict`) instead of
+  relying on Ollama's unlimited default.
 - `go install github.com/mdabydeen/metron/cmd/metron@latest` now works: the module has a
   resolvable path and the command lives under `cmd/metron`.
 - Homebrew installs via a cask rather than a formula, following GoReleaser's deprecation of

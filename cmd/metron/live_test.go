@@ -117,11 +117,12 @@ func liveSetup(t *testing.T) (*countingChatter, *agent.Agent, config.Config) {
 	t.Logf("live model: %s at %s", cfg.Model, cfg.Endpoint)
 
 	client := ollama.NewClient(cfg.Endpoint, cfg.Model, ollama.Options{
-		Temperature: cfg.Temperature,
-		TopP:        cfg.TopP,
-		NumCtx:      cfg.NumCtx,
-		Timeout:     time.Duration(cfg.TimeoutSeconds) * time.Second,
-		Stream:      cfg.Stream,
+		Temperature:     cfg.Temperature,
+		TopP:            cfg.TopP,
+		NumCtx:          cfg.NumCtx,
+		MaxOutputTokens: cfg.MaxOutputTokens,
+		Timeout:         time.Duration(cfg.TimeoutSeconds) * time.Second,
+		Stream:          cfg.Stream,
 	})
 	counting := &countingChatter{inner: client}
 	return counting, agent.New(counting, agent.Options{

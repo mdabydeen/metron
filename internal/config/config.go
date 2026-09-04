@@ -32,6 +32,10 @@ type Config struct {
 	Temperature float64 `json:"temperature"`
 	TopP        float64 `json:"top_p"`
 	NumCtx      int     `json:"num_ctx"`
+	// MaxOutputTokens is sent to Ollama as num_predict. Ollama otherwise
+	// defaults to unlimited generation, which conflicts with metron's bounded
+	// context and tool philosophy.
+	MaxOutputTokens int `json:"max_output_tokens"`
 
 	// Agent loop
 	MaxTurns           int `json:"max_turns"`
@@ -74,6 +78,7 @@ func Defaults() Config {
 		Temperature:        0.1,
 		TopP:               0.95,
 		NumCtx:             16384,
+		MaxOutputTokens:    4096,
 		MaxTurns:           10,
 		CompactThreshold:   400,
 		MaxHistoryMessages: 60,
@@ -191,6 +196,7 @@ func (c Config) Validate() error {
 	}{
 		{"timeout_seconds", c.TimeoutSeconds},
 		{"num_ctx", c.NumCtx},
+		{"max_output_tokens", c.MaxOutputTokens},
 		{"max_turns", c.MaxTurns},
 		{"compact_threshold_bytes", c.CompactThreshold},
 		{"max_history_messages", c.MaxHistoryMessages},

@@ -107,11 +107,12 @@ func runMain(args []string, in io.Reader, out, errOut io.Writer) int {
 	}
 
 	clientOpts := ollama.Options{
-		Temperature: cfg.Temperature,
-		TopP:        cfg.TopP,
-		NumCtx:      cfg.NumCtx,
-		Timeout:     time.Duration(cfg.TimeoutSeconds) * time.Second,
-		Stream:      cfg.Stream,
+		Temperature:     cfg.Temperature,
+		TopP:            cfg.TopP,
+		NumCtx:          cfg.NumCtx,
+		MaxOutputTokens: cfg.MaxOutputTokens,
+		Timeout:         time.Duration(cfg.TimeoutSeconds) * time.Second,
+		Stream:          cfg.Stream,
 	}
 	// One-shot mode wants exactly one clean answer on stdout, so it never
 	// streams; there is no reader watching it arrive.

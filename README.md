@@ -192,6 +192,7 @@ cp metron.example.json .metron.json
 | `temperature` | `0.1` | sampling temperature |
 | `top_p` | `0.95` | nucleus sampling cutoff |
 | `num_ctx` | `16384` | context window requested from Ollama |
+| `max_output_tokens` | `4096` | maximum tokens Ollama may generate in one model call |
 | `max_turns` | `10` | model round-trips allowed in one user turn |
 | `compact_threshold_bytes` | `400` | tool output above this size is purged after the turn |
 | `max_history_messages` | `60` | messages kept after a turn, excluding the system prompt |
@@ -209,6 +210,10 @@ cp metron.example.json .metron.json
 A file that exists but cannot be read or parsed is a startup error, not a silent fallback —
 including unknown keys, so a typo like `"modle"` is reported instead of ignored. Values are
 validated (positive budgets, `top_p` in `(0, 1]`) before the agent starts.
+
+`max_output_tokens` is sent to Ollama as `num_predict`. This makes every model call finite;
+Ollama's own default permits unlimited generation. The limit applies separately to each
+round-trip in an agent turn, including replies that request tools.
 
 **The default model is probably not yours.** `qwen2.5-coder:32b` is a placeholder; set `model`
 to something you have actually pulled and that reports the `tools` capability.
