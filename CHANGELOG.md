@@ -14,6 +14,10 @@ is pre-1.0, the minor version is bumped for breaking changes to configuration or
   local tool dependencies, Ollama connectivity, and model tool support.
 - `max_output_tokens` bounds each model generation (Ollama `num_predict`) instead of
   relying on Ollama's unlimited default.
+- Security automation now runs CodeQL, Go vulnerability scanning, and pull-request
+  dependency review. Releases include SPDX SBOMs and GitHub provenance attestations.
+- The minimum Go version is 1.26.6, incorporating standard-library security fixes that are
+  part of every statically linked metron binary.
 - `go install github.com/mdabydeen/metron/cmd/metron@latest` now works: the module has a
   resolvable path and the command lives under `cmd/metron`.
 - Homebrew installs via a cask rather than a formula, following GoReleaser's deprecation of

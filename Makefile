@@ -3,7 +3,7 @@ INSTALL_PATH=/usr/local/bin
 COVERPROFILE=coverage.out
 DOCKER_IMAGE=metron-test
 
-.PHONY: build install test race cover vet fmt lint check \
+.PHONY: build install test race cover vet vuln fmt lint check \
         docker-build docker-test docker-race docker-cover test-live \
         release-check release-snapshot clean
 
@@ -33,6 +33,11 @@ cover:
 
 vet:
 	go vet ./...
+
+# Needs govulncheck on PATH. CI runs the pinned official action weekly and on
+# every pull request; this target gives contributors the same source-level scan.
+vuln:
+	govulncheck ./...
 
 fmt:
 	gofmt -l -w .

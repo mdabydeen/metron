@@ -7,6 +7,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   release:
@@ -20,7 +22,7 @@ jobs:
 
       - uses: actions/setup-go@v7
         with:
-          go-version: '1.26'
+          go-version: '1.26.6'
 
       # The `before` hooks run the hermetic suite, which needs none of these --
       # but a release that ships an untested binary is not worth the minute
@@ -31,6 +33,9 @@ jobs:
       - name: Test
         run: go test -tags=integration ./...
 
+      - name: Install Syft for release SBOMs
+        uses: anchore/sbom-action/download-syft@v0
+
       - uses: goreleaser/goreleaser-action@v7
         with:
           version: '~> v2'
@@ -40,3 +45,11 @@ jobs:
           # A PAT with contents:write on mdabydeen/homebrew-tap. Without it the
           # release still publishes; only the formula update is skipped.
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      # GoReleaser's checksum manifest covers every archive and generated SBOM.
+      # GitHub signs that manifest with the workflow's OIDC identity, allowing
+      # users to verify that a download came from this release workflow.
+      - name: Attest release artifacts
+        uses: actions/attest@v4
+        with:
+          subject-checksums: dist/checksums.txt
