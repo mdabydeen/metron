@@ -23,6 +23,9 @@ it means the threat model is unusual.
 **By design:**
 
 - `apply_patch` writes to files in your working directory via `git apply`.
+- `edit_file` writes to files in your working directory directly, when
+  `edit_format` is `search_replace`. It goes through the same path confinement
+  and the same approval prompt, and shows you a unified diff.
 - Every patch is shown to you as a diff and requires an explicit `y` before it is applied.
   End-of-input answers *no* — an operator who has walked away has not consented.
 - `auto_approve_patches: true` in config, and the `--yes` flag, **disable that prompt

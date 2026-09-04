@@ -57,6 +57,11 @@ type Env struct {
 	// offered at all, so granting execution is something an operator does on
 	// purpose rather than something they forget to switch off.
 	Allowed [][]string
+
+	// EditFormat selects how the model is asked to express a change: a unified
+	// diff (apply_patch) or an anchored search/replace (edit_file). Empty means
+	// FormatDiff, so a zero Env keeps the original behaviour.
+	EditFormat string
 }
 
 // NewEnv builds an Env rooted at the current repository.

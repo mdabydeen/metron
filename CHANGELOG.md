@@ -31,6 +31,16 @@ is pre-1.0, the minor version is bumped for breaking changes to configuration or
   a git repository withdraws `apply_patch`. Their schemas are then not sent at all, and the
   system prompt stops naming them — on a stock Mac that is ~164 fewer prompt tokens on every
   request. A call to an unadvertised tool is refused before it runs.
+- `edit_file`, an anchored search/replace edit format, selected with
+  `"edit_format": "search_replace"`. Unified diffs need exact line numbers and hunk headers,
+  which is what small models most reliably get wrong; this asks them to quote lines they have
+  already read instead. The quote must match exactly once -- ambiguity is an error telling the
+  model to quote more, never a guess -- and matching runs a ladder from exact, through
+  ignoring trailing whitespace, to ignoring indentation, re-indenting the replacement to the
+  file's own indentation and saying when the match was not exact. The operator still approves
+  a unified diff. It needs no git, so it is the only working edit path on a machine without
+  one. `edit_format` defaults to `diff`; the two edit tools are alternatives and only the
+  selected one is advertised.
 - `run_command` runs one permitted command in the project and returns its exit status and
   output, so the agent can check its own edit rather than assert it worked. It is off by
   default: with no `allowed_commands` set the tool is not advertised and its schema is not
