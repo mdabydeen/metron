@@ -101,7 +101,8 @@ func Defaults() Config {
 const ProjectFile = ".metron.json"
 
 // Search returns the config file paths metron consults, highest priority
-// first. An explicit path (from METRON_CONFIG) short-circuits the search.
+// first. METRON_CONFIG_DIR selects the base directory for the user config;
+// otherwise the user's home directory is used.
 func Search() []string {
 	return SearchFrom("")
 }
@@ -119,14 +120,14 @@ func SearchFrom(projectRoot string) []string {
 		projectFile = filepath.Join(projectRoot, ProjectFile)
 	}
 	paths := []string{projectFile}
-	dir := os.Getenv("XDG_CONFIG_HOME")
+	dir := os.Getenv("METRON_CONFIG_DIR")
 	if dir == "" {
 		if home, err := os.UserHomeDir(); err == nil {
-			dir = filepath.Join(home, ".config")
+			dir = home
 		}
 	}
 	if dir != "" {
-		paths = append(paths, filepath.Join(dir, "metron", "config.json"))
+		paths = append(paths, filepath.Join(dir, ".metron", "config.json"))
 	}
 	return paths
 }

@@ -17,7 +17,7 @@ func isolate(t *testing.T) string {
 	dir := t.TempDir()
 	t.Chdir(dir)
 	t.Setenv("METRON_CONFIG", "")
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "xdg"))
+	t.Setenv("METRON_CONFIG_DIR", dir)
 	t.Setenv("OLLAMA_HOST", "")
 	t.Setenv("OLLAMA_MODEL", "")
 	return dir
@@ -90,7 +90,7 @@ func TestLoadFromReadsProjectRootOutsideCurrentDirectory(t *testing.T) {
 
 func TestLoadFallsBackToUserFile(t *testing.T) {
 	dir := isolate(t)
-	userDir := filepath.Join(dir, "xdg", "metron")
+	userDir := filepath.Join(dir, ".metron")
 	if err := os.MkdirAll(userDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +113,7 @@ func TestLoadFallsBackToUserFile(t *testing.T) {
 
 func TestProjectFileWinsOverUserFile(t *testing.T) {
 	dir := isolate(t)
-	userDir := filepath.Join(dir, "xdg", "metron")
+	userDir := filepath.Join(dir, ".metron")
 	if err := os.MkdirAll(userDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -276,10 +276,10 @@ func TestSearchOrder(t *testing.T) {
 			t.Fatalf("Search() = %v, want only the explicit path", got)
 		}
 	})
-	t.Run("project file then XDG", func(t *testing.T) {
+	t.Run("project file then metron directory", func(t *testing.T) {
 		t.Setenv("METRON_CONFIG", "")
-		t.Setenv("XDG_CONFIG_HOME", "/xdg")
-		want := []string{ProjectFile, filepath.Join("/xdg", "metron", "config.json")}
+		t.Setenv("METRON_CONFIG_DIR", "/xdg")
+		want := []string{ProjectFile, filepath.Join("/xdg", ".metron", "config.json")}
 		got := Search()
 		if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
 			t.Fatalf("Search() = %v, want %v", got, want)
@@ -287,8 +287,8 @@ func TestSearchOrder(t *testing.T) {
 	})
 	t.Run("explicit project root then XDG", func(t *testing.T) {
 		t.Setenv("METRON_CONFIG", "")
-		t.Setenv("XDG_CONFIG_HOME", "/xdg")
-		want := []string{filepath.Join("/repo", ProjectFile), filepath.Join("/xdg", "metron", "config.json")}
+		t.Setenv("METRON_CONFIG_DIR", "/xdg")
+		want := []string{filepath.Join("/repo", ProjectFile), filepath.Join("/xdg", ".metron", "config.json")}
 		got := SearchFrom("/repo")
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("SearchFrom() = %v, want %v", got, want)
@@ -296,13 +296,22 @@ func TestSearchOrder(t *testing.T) {
 	})
 	t.Run("falls back to the home directory", func(t *testing.T) {
 		t.Setenv("METRON_CONFIG", "")
-		t.Setenv("XDG_CONFIG_HOME", "")
+		t.Setenv("METRON_CONFIG_DIR", "")
 		home := t.TempDir()
 		t.Setenv("HOME", home)
-		want := filepath.Join(home, ".config", "metron", "config.json")
+		want := filepath.Join(home, ".metron", "config.json")
 		got := Search()
 		if len(got) != 2 || got[1] != want {
 			t.Fatalf("Search() = %v, want the second entry to be %q", got, want)
+		}
+	})
+	t.Run("uses specified directory", func(t *testing.T) {
+		t.Setenv("METRON_CONFIG", "")
+		t.Setenv("METRON_CONFIG_DIR", "/opt/metron-config")
+		want := filepath.Join("/opt/metron-config", ".metron", "config.json")
+		got := Search()
+		if len(got) != 2 || got[1] != want {
+			t.Fatalf("Search() = %v, want second entry %q", got, want)
 		}
 	})
 }
