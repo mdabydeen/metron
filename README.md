@@ -183,7 +183,12 @@ first file it finds:
 
 1. `$METRON_CONFIG`, if set (an explicit path short-circuits the search)
 2. `<repository-root>/.metron.json` — per-project, found even when metron starts in a subdirectory
-3. `$XDG_CONFIG_HOME/metron/config.json`, else `~/.config/metron/config.json`
+3. `$METRON_CONFIG_DIR/.metron/config.json`, else `~/.metron/config.json`
+
+Set `METRON_CONFIG_DIR` to use a specified base directory. This works with both Homebrew and
+Go installations; the config is read at runtime, independent of where the binary is installed.
+For example: `METRON_CONFIG_DIR=/srv/metron metron` uses
+`/srv/metron/.metron/config.json`.
 
 Copy [`metron.example.json`](metron.example.json) to get started; it lists every key at its
 default value.
@@ -246,6 +251,7 @@ Two variables override the file, for one-off runs:
 | `OLLAMA_HOST` | `endpoint` |
 | `OLLAMA_MODEL` | `model` |
 | `METRON_CONFIG` | which config file is read |
+| `METRON_CONFIG_DIR` | base directory containing `.metron/config.json` |
 
 ```bash
 OLLAMA_MODEL=gemma4:12b-mlx metron

@@ -83,8 +83,9 @@ First tagged release. Everything below was developed before the changelog existe
 - Per-turn token accounting, with a warning when the prompt approaches `num_ctx`.
 - History compaction: large file slices are purged once a turn completes, and history is
   trimmed to a message budget.
-- Configuration via `.metron.json`, `$XDG_CONFIG_HOME/metron/config.json` or
-  `METRON_CONFIG`, overridden by `OLLAMA_HOST` and `OLLAMA_MODEL`.
+- Configuration via `.metron.json`, `~/.metron/config.json` (or
+  `$METRON_CONFIG_DIR/.metron/config.json`) or `METRON_CONFIG`, overridden by
+  `OLLAMA_HOST` and `OLLAMA_MODEL`.
 - Startup preflight naming any missing dependency and the tool it disables, including the
   BSD-versus-Universal ctags distinction.
 - One-shot mode (`-p`) that prints only the answer on stdout, failing closed on patches
