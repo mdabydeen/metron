@@ -143,7 +143,13 @@ func runMain(args []string, in io.Reader, out, errOut io.Writer) int {
 	}}
 	env.Allowed = tools.ParseAllowlist(cfg.AllowedCommands)
 	if f.doctor {
-		return runDoctor(context.Background(), out, cfg, path, env, client)
+		return runDoctor(context.Background(), out, errOut, cfg, path, env, client)
+	}
+	// The local model is what keeps the conversation on the machine. A config
+	// that points elsewhere is a data-exfiltration surface, so say so on stderr:
+	// the operator, not the model, should know the prompt history leaves home.
+	if w := ollama.EndpointWarning(cfg.Endpoint); w != "" {
+		fmt.Fprintf(errOut, "\033[33mwarning: %s\033[0m\n", w)
 	}
 	opts := agent.Options{
 		MaxTurns:           cfg.MaxTurns,
@@ -182,12 +188,20 @@ type modelProber interface {
 // runDoctor checks everything needed for a useful first run without loading a
 // model or changing the project. Its exit code makes it usable as a setup and
 // CI health check, while the line-oriented output stays easy to diagnose.
-func runDoctor(ctx context.Context, out io.Writer, cfg config.Config, cfgPath string, env tools.Env, prober modelProber) int {
+func runDoctor(ctx context.Context, out, errOut io.Writer, cfg config.Config, cfgPath string, env tools.Env, prober modelProber) int {
 	if cfgPath == "" {
 		cfgPath = "built-in defaults"
 	}
 	fmt.Fprintf(out, "project: ok (%s)\n", env.Root)
 	fmt.Fprintf(out, "config: ok (%s)\n", cfgPath)
+
+	// A non-loopback endpoint keeps the conversation off the machine, which the
+	// operator -- not the model -- should know about. It is not a failing check,
+	// so it lands on stderr like the runtime notice rather than on the
+	// line-oriented stdout above.
+	if w := ollama.EndpointWarning(cfg.Endpoint); w != "" {
+		fmt.Fprintf(errOut, "%s\n", w)
+	}
 
 	ready := true
 	warnings := env.Preflight()

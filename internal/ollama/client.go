@@ -154,8 +154,13 @@ func showEndpoint(endpoint string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("invalid Ollama endpoint: %w", err)
 	}
-	if u.Scheme == "" || u.Host == "" || !strings.HasSuffix(u.Path, "/api/chat") {
+	// Probe rewrites the chat path to /api/show, so unlike Chat it requires the
+	// suffix the operator can otherwise get wrong.
+	if !strings.HasSuffix(u.Path, "/api/chat") {
 		return "", fmt.Errorf("invalid Ollama chat endpoint %q (want http(s)://host/api/chat)", endpoint)
+	}
+	if err := endpointAllowed(u, endpoint); err != nil {
+		return "", err
 	}
 	u.Path = strings.TrimSuffix(u.Path, "/api/chat") + "/api/show"
 	u.RawPath = ""
@@ -177,6 +182,10 @@ func NewClient(endpoint, model string, opts Options) *Client {
 }
 
 func (c *Client) Chat(ctx context.Context, messages []Message, tools []Tool) (*Reply, error) {
+	if err := validateEndpoint(c.endpoint); err != nil {
+		return nil, err
+	}
+
 	reqBody := ChatRequest{
 		Model:    c.model,
 		Messages: messages,
