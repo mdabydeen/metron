@@ -32,6 +32,10 @@ type Config struct {
 	Temperature float64 `json:"temperature"`
 	TopP        float64 `json:"top_p"`
 	NumCtx      int     `json:"num_ctx"`
+	// MaxOutputTokens is sent to Ollama as num_predict. Ollama otherwise
+	// defaults to unlimited generation, which conflicts with metron's bounded
+	// context and tool philosophy.
+	MaxOutputTokens int `json:"max_output_tokens"`
 
 	// Agent loop
 	MaxTurns           int `json:"max_turns"`
@@ -74,6 +78,7 @@ func Defaults() Config {
 		Temperature:        0.1,
 		TopP:               0.95,
 		NumCtx:             16384,
+		MaxOutputTokens:    4096,
 		MaxTurns:           10,
 		CompactThreshold:   400,
 		MaxHistoryMessages: 60,
@@ -92,16 +97,28 @@ func Defaults() Config {
 	}
 }
 
-// ProjectFile is the config file metron looks for in the working directory.
+// ProjectFile is the per-project configuration filename.
 const ProjectFile = ".metron.json"
 
 // Search returns the config file paths metron consults, highest priority
 // first. An explicit path (from METRON_CONFIG) short-circuits the search.
 func Search() []string {
+	return SearchFrom("")
+}
+
+// SearchFrom is Search with an explicit project root. It is used by the CLI
+// after it has resolved the enclosing repository, so starting metron in a
+// nested package still finds the configuration stored at the repository root.
+// An empty projectRoot preserves Search's current-working-directory behaviour.
+func SearchFrom(projectRoot string) []string {
 	if explicit := os.Getenv("METRON_CONFIG"); explicit != "" {
 		return []string{explicit}
 	}
-	paths := []string{ProjectFile}
+	projectFile := ProjectFile
+	if projectRoot != "" {
+		projectFile = filepath.Join(projectRoot, ProjectFile)
+	}
+	paths := []string{projectFile}
 	dir := os.Getenv("XDG_CONFIG_HOME")
 	if dir == "" {
 		if home, err := os.UserHomeDir(); err == nil {
@@ -122,10 +139,17 @@ func Search() []string {
 // silent fallback -- a typo in a config file should not quietly change how the
 // agent behaves.
 func Load() (Config, string, error) {
+	return LoadFrom("")
+}
+
+// LoadFrom resolves configuration like Load, but reads the project file from
+// projectRoot. This keeps the package useful to callers that want cwd-based
+// lookup while allowing the CLI to use the same repository root as its tools.
+func LoadFrom(projectRoot string) (Config, string, error) {
 	cfg := Defaults()
 
 	var used string
-	for _, path := range Search() {
+	for _, path := range SearchFrom(projectRoot) {
 		data, err := os.ReadFile(path)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
@@ -172,6 +196,7 @@ func (c Config) Validate() error {
 	}{
 		{"timeout_seconds", c.TimeoutSeconds},
 		{"num_ctx", c.NumCtx},
+		{"max_output_tokens", c.MaxOutputTokens},
 		{"max_turns", c.MaxTurns},
 		{"compact_threshold_bytes", c.CompactThreshold},
 		{"max_history_messages", c.MaxHistoryMessages},

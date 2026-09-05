@@ -98,6 +98,10 @@ func liveSetup(t *testing.T) (*countingChatter, *agent.Agent, config.Config) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
+	// Env captures its project root when the agent is constructed. Create and
+	// enter the scratch repository first, or the live tools accidentally target
+	// metron's own checkout and the test can pass while inspecting the wrong code.
+	liveRepo(t)
 
 	cfg := config.Defaults()
 	if v := os.Getenv("OLLAMA_HOST"); v != "" {
@@ -117,11 +121,12 @@ func liveSetup(t *testing.T) (*countingChatter, *agent.Agent, config.Config) {
 	t.Logf("live model: %s at %s", cfg.Model, cfg.Endpoint)
 
 	client := ollama.NewClient(cfg.Endpoint, cfg.Model, ollama.Options{
-		Temperature: cfg.Temperature,
-		TopP:        cfg.TopP,
-		NumCtx:      cfg.NumCtx,
-		Timeout:     time.Duration(cfg.TimeoutSeconds) * time.Second,
-		Stream:      cfg.Stream,
+		Temperature:     cfg.Temperature,
+		TopP:            cfg.TopP,
+		NumCtx:          cfg.NumCtx,
+		MaxOutputTokens: cfg.MaxOutputTokens,
+		Timeout:         time.Duration(cfg.TimeoutSeconds) * time.Second,
+		Stream:          cfg.Stream,
 	})
 	counting := &countingChatter{inner: client}
 	return counting, agent.New(counting, agent.Options{
@@ -167,7 +172,6 @@ func Greet() string {
 // a real model, a real HTTP call, a real reply.
 func TestLiveModelAnswersWithoutTools(t *testing.T) {
 	counting, bot, cfg := liveSetup(t)
-	liveRepo(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutSeconds)*time.Second)
 	defer cancel()
@@ -190,7 +194,6 @@ func TestLiveModelAnswersWithoutTools(t *testing.T) {
 // model, so the assertion is that it used at least one of them.
 func TestLiveToolUse(t *testing.T) {
 	counting, bot, cfg := liveSetup(t)
-	liveRepo(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutSeconds)*time.Second)
 	defer cancel()
@@ -223,7 +226,6 @@ func TestLiveToolUse(t *testing.T) {
 // agent loop itself breaks.
 func TestLivePatchWorkflow(t *testing.T) {
 	counting, bot, cfg := liveSetup(t)
-	liveRepo(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutSeconds)*time.Second)
 	defer cancel()

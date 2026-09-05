@@ -82,11 +82,82 @@ func TestChatSendsWellFormedRequest(t *testing.T) {
 	if len(gotBody.Tools) != 1 {
 		t.Errorf("tools = %+v, want the tool definitions forwarded", gotBody.Tools)
 	}
-	for key, want := range map[string]float64{"temperature": 0.1, "top_p": 0.95, "num_ctx": 16384} {
+	for key, want := range map[string]float64{"temperature": 0.1, "top_p": 0.95, "num_ctx": 16384, "num_predict": 4096} {
 		if got, ok := gotBody.Options[key].(float64); !ok || got != want {
 			t.Errorf("options[%q] = %v, want %v", key, gotBody.Options[key], want)
 		}
 	}
+}
+
+func TestProbeChecksConfiguredModelCapabilities(t *testing.T) {
+	var gotPath, gotModel string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		gotModel = body["model"]
+		_, _ = io.WriteString(w, `{"capabilities":["completion","tools"]}`)
+	}))
+	defer srv.Close()
+
+	info, err := NewClient(srv.URL+"/api/chat", "qwen", DefaultOptions()).Probe(context.Background())
+	if err != nil {
+		t.Fatalf("Probe() error = %v", err)
+	}
+	if gotPath != "/api/show" || gotModel != "qwen" || !info.Supports("tools") || info.Supports("vision") {
+		t.Fatalf("Probe() = %+v, request path %q model %q", info, gotPath, gotModel)
+	}
+}
+
+func TestProbeReportsEndpointHTTPAndDecodeFailures(t *testing.T) {
+	t.Run("invalid endpoint", func(t *testing.T) {
+		_, err := NewClient("not-an-ollama-url", "m", DefaultOptions()).Probe(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "invalid Ollama chat endpoint") {
+			t.Fatalf("Probe() error = %v", err)
+		}
+	})
+	t.Run("malformed URL", func(t *testing.T) {
+		_, err := NewClient("http://[::1/api/chat", "m", DefaultOptions()).Probe(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "invalid Ollama endpoint") {
+			t.Fatalf("Probe() error = %v", err)
+		}
+	})
+	t.Run("unreachable", func(t *testing.T) {
+		_, err := NewClient("http://127.0.0.1:1/api/chat", "m", DefaultOptions()).Probe(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "contact Ollama") {
+			t.Fatalf("Probe() error = %v", err)
+		}
+	})
+	t.Run("nil context", func(t *testing.T) {
+		// Passing nil is deliberate: it is the only way to exercise and retain
+		// Probe's defensive request-construction error path.
+		_, err := NewClient("http://localhost/api/chat", "m", DefaultOptions()).Probe(nil) //nolint:staticcheck
+		if err == nil || !strings.Contains(err.Error(), "create model probe") {
+			t.Fatalf("Probe() error = %v", err)
+		}
+	})
+	t.Run("server error", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "model missing", http.StatusNotFound)
+		}))
+		defer srv.Close()
+		_, err := NewClient(srv.URL+"/api/chat", "m", DefaultOptions()).Probe(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "status 404") || !strings.Contains(err.Error(), "model missing") {
+			t.Fatalf("Probe() error = %v", err)
+		}
+	})
+	t.Run("bad response", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = io.WriteString(w, "not json")
+		}))
+		defer srv.Close()
+		_, err := NewClient(srv.URL+"/api/chat", "m", DefaultOptions()).Probe(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "decode Ollama model details") {
+			t.Fatalf("Probe() error = %v", err)
+		}
+	})
 }
 
 func TestChatOmitsToolsWhenEmpty(t *testing.T) {
@@ -217,12 +288,12 @@ func TestChatSendsConfiguredSamplingOptions(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	opts := Options{Temperature: 0.7, TopP: 0.5, NumCtx: 4096, Timeout: 5 * time.Second}
+	opts := Options{Temperature: 0.7, TopP: 0.5, NumCtx: 4096, MaxOutputTokens: 512, Timeout: 5 * time.Second}
 	if _, err := NewClient(srv.URL, "m", opts).Chat(context.Background(), nil, nil); err != nil {
 		t.Fatalf("Chat() error = %v", err)
 	}
 
-	for key, want := range map[string]float64{"temperature": 0.7, "top_p": 0.5, "num_ctx": 4096} {
+	for key, want := range map[string]float64{"temperature": 0.7, "top_p": 0.5, "num_ctx": 4096, "num_predict": 512} {
 		if v, _ := got.Options[key].(float64); v != want {
 			t.Errorf("options[%q] = %v, want %v", key, got.Options[key], want)
 		}

@@ -17,7 +17,7 @@ jobs:
 
       - uses: actions/setup-go@v7
         with:
-          go-version: '1.26'
+          go-version: '1.26.6'
 
       # Guarantee the precondition rather than hoping the runner image happens
       # to satisfy it: strip the binaries if present, then assert they are gone.
@@ -43,7 +43,7 @@ jobs:
 
       - uses: actions/setup-go@v7
         with:
-          go-version: '1.26'
+          go-version: '1.26.6'
 
       # The same three binaries Dockerfile.test installs, so the integration
       # tier runs here too.
@@ -84,7 +84,7 @@ jobs:
 
       - uses: actions/setup-go@v7
         with:
-          go-version: '1.26'
+          go-version: '1.26.6'
 
       # Version deliberately unpinned: the action's default tracks a v2 release
       # that matches the v2 schema in .golangci.yml. Pin it once a known-good
@@ -110,14 +110,19 @@ jobs:
 
       - uses: actions/setup-go@v7
         with:
-          go-version: '1.26'
+          go-version: '1.26.6'
 
       - uses: goreleaser/goreleaser-action@v7
         with:
           version: '~> v2'
           args: check
 
+      - name: Install Syft for release SBOMs
+        uses: anchore/sbom-action/download-syft@v0
+
       - uses: goreleaser/goreleaser-action@v7
         with:
           version: '~> v2'
-          args: build --snapshot --clean
+          # Exercise archives, SBOM generation, checksums and package-manager
+          # metadata as well as compilation, while publishing nothing.
+          args: release --snapshot --clean --skip=publish

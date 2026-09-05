@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"slices"
 	"strings"
 	"time"
 )
@@ -73,9 +75,10 @@ type Reply struct {
 // Options carries the per-request generation settings, the idle timeout and
 // where streamed content is echoed.
 type Options struct {
-	Temperature float64
-	TopP        float64
-	NumCtx      int
+	Temperature     float64
+	TopP            float64
+	NumCtx          int
+	MaxOutputTokens int
 
 	// Timeout bounds silence, not total generation. A total deadline is the
 	// wrong shape for a local model: a big one legitimately spends minutes on a
@@ -93,7 +96,7 @@ type Options struct {
 
 // DefaultOptions matches metron's built-in configuration.
 func DefaultOptions() Options {
-	return Options{Temperature: 0.1, TopP: 0.95, NumCtx: 16384, Timeout: 180 * time.Second}
+	return Options{Temperature: 0.1, TopP: 0.95, NumCtx: 16384, MaxOutputTokens: 4096, Timeout: 180 * time.Second}
 }
 
 type Client struct {
@@ -101,6 +104,62 @@ type Client struct {
 	model    string
 	opts     Options
 	http     *http.Client
+}
+
+// ModelInfo is the small part of Ollama's model metadata that metron needs to
+// decide whether a configured model can drive tools.
+type ModelInfo struct {
+	Capabilities []string `json:"capabilities"`
+}
+
+// Probe verifies that the configured Ollama endpoint is reachable, the model
+// exists, and the server can return its capabilities without running an
+// inference. It powers the CLI's fast, side-effect-free --doctor check.
+func (c *Client) Probe(ctx context.Context) (ModelInfo, error) {
+	endpoint, err := showEndpoint(c.endpoint)
+	if err != nil {
+		return ModelInfo{}, err
+	}
+	var payload bytes.Buffer
+	_ = json.NewEncoder(&payload).Encode(map[string]string{"model": c.model})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, &payload)
+	if err != nil {
+		return ModelInfo{}, fmt.Errorf("create model probe: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return ModelInfo{}, fmt.Errorf("contact Ollama: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+		return ModelInfo{}, fmt.Errorf("ollama model check failed (status %d): %s",
+			resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var info ModelInfo
+	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		return ModelInfo{}, fmt.Errorf("decode Ollama model details: %w", err)
+	}
+	return info, nil
+}
+
+// Supports reports whether Ollama advertised a named model capability.
+func (m ModelInfo) Supports(capability string) bool {
+	return slices.Contains(m.Capabilities, capability)
+}
+
+func showEndpoint(endpoint string) (string, error) {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return "", fmt.Errorf("invalid Ollama endpoint: %w", err)
+	}
+	if u.Scheme == "" || u.Host == "" || !strings.HasSuffix(u.Path, "/api/chat") {
+		return "", fmt.Errorf("invalid Ollama chat endpoint %q (want http(s)://host/api/chat)", endpoint)
+	}
+	u.Path = strings.TrimSuffix(u.Path, "/api/chat") + "/api/show"
+	u.RawPath = ""
+	return u.String(), nil
 }
 
 func NewClient(endpoint, model string, opts Options) *Client {
@@ -127,6 +186,7 @@ func (c *Client) Chat(ctx context.Context, messages []Message, tools []Tool) (*R
 			"temperature": c.opts.Temperature,
 			"top_p":       c.opts.TopP,
 			"num_ctx":     c.opts.NumCtx,
+			"num_predict": c.opts.MaxOutputTokens,
 		},
 	}
 

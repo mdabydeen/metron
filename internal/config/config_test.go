@@ -66,6 +66,28 @@ func TestLoadReadsProjectFile(t *testing.T) {
 	}
 }
 
+func TestLoadFromReadsProjectRootOutsideCurrentDirectory(t *testing.T) {
+	dir := isolate(t)
+	project := filepath.Join(dir, "project")
+	nested := filepath.Join(project, "pkg", "deep")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, ProjectFile), []byte(`{"model":"from-root"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(nested)
+
+	cfg, path, err := LoadFrom(project)
+	if err != nil {
+		t.Fatalf("LoadFrom() error = %v", err)
+	}
+	wantPath := filepath.Join(project, ProjectFile)
+	if path != wantPath || cfg.Model != "from-root" {
+		t.Fatalf("LoadFrom() = model %q from %q, want from-root from %q", cfg.Model, path, wantPath)
+	}
+}
+
 func TestLoadFallsBackToUserFile(t *testing.T) {
 	dir := isolate(t)
 	userDir := filepath.Join(dir, "xdg", "metron")
@@ -209,6 +231,7 @@ func TestValidate(t *testing.T) {
 		{"empty model", func(c *Config) { c.Model = "" }, "model must not be empty"},
 		{"zero timeout", func(c *Config) { c.TimeoutSeconds = 0 }, "timeout_seconds must be > 0"},
 		{"negative num_ctx", func(c *Config) { c.NumCtx = -1 }, "num_ctx must be > 0"},
+		{"zero output budget", func(c *Config) { c.MaxOutputTokens = 0 }, "max_output_tokens must be > 0"},
 		{"zero max turns", func(c *Config) { c.MaxTurns = 0 }, "max_turns must be > 0"},
 		{"zero compaction", func(c *Config) { c.CompactThreshold = 0 }, "compact_threshold_bytes must be > 0"},
 		{"zero history budget", func(c *Config) { c.MaxHistoryMessages = 0 }, "max_history_messages must be > 0"},
@@ -260,6 +283,15 @@ func TestSearchOrder(t *testing.T) {
 		got := Search()
 		if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
 			t.Fatalf("Search() = %v, want %v", got, want)
+		}
+	})
+	t.Run("explicit project root then XDG", func(t *testing.T) {
+		t.Setenv("METRON_CONFIG", "")
+		t.Setenv("XDG_CONFIG_HOME", "/xdg")
+		want := []string{filepath.Join("/repo", ProjectFile), filepath.Join("/xdg", "metron", "config.json")}
+		got := SearchFrom("/repo")
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("SearchFrom() = %v, want %v", got, want)
 		}
 	})
 	t.Run("falls back to the home directory", func(t *testing.T) {

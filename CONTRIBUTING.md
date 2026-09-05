@@ -40,10 +40,15 @@ These hold for every change:
 git clone https://github.com/mdabydeen/metron
 cd metron
 make check          # vet + test + race + coverage
+make vuln           # known-vulnerability scan (requires govulncheck)
 ```
 
 Runtime (not testing) needs `rg`, Universal Ctags and `git` on PATH, plus a reachable
 Ollama server with a tool-capable model. `metron` warns at startup about anything missing.
+
+Install the optional security scanner with
+`go install golang.org/x/vuln/cmd/govulncheck@latest`. CI runs the official pinned action,
+so contributors do not need it for ordinary local tests.
 
 On macOS, note that the system `ctags` is BSD ctags and does **not** work —
 `brew install universal-ctags`, and make sure it comes first on `PATH`.

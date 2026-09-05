@@ -10,6 +10,14 @@ is pre-1.0, the minor version is bumped for breaking changes to configuration or
 
 ### Added
 
+- `metron --doctor` performs a side-effect-free readiness check of configuration,
+  local tool dependencies, Ollama connectivity, and model tool support.
+- `max_output_tokens` bounds each model generation (Ollama `num_predict`) instead of
+  relying on Ollama's unlimited default.
+- Security automation now runs CodeQL, Go vulnerability scanning, and pull-request
+  dependency review. Releases include SPDX SBOMs and GitHub provenance attestations.
+- The minimum Go version is 1.26.6, incorporating standard-library security fixes that are
+  part of every statically linked metron binary.
 - `go install github.com/mdabydeen/metron/cmd/metron@latest` now works: the module has a
   resolvable path and the command lives under `cmd/metron`.
 - Homebrew installs via a cask rather than a formula, following GoReleaser's deprecation of
@@ -54,6 +62,10 @@ is pre-1.0, the minor version is bumped for breaking changes to configuration or
 
 ### Fixed
 
+- Starting metron in a repository subdirectory now loads `.metron.json` from the
+  repository root, matching the project root used by every tool.
+- Live-model tests now construct the agent after entering their throwaway repository, so
+  tool calls inspect and patch the fixture instead of metron's own checkout.
 - `search_text` no longer lets a pattern beginning with a dash be parsed by ripgrep as a
   flag. A search for `--files` listed every file in the repository and applied no match
   budget at all; the pattern now follows a `--` separator. `list_files` passes its glob as

@@ -3,6 +3,7 @@
 [![CI](https://github.com/mdabydeen/metron/actions/workflows/ci.yml/badge.svg)](https://github.com/mdabydeen/metron/actions/workflows/ci.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/mdabydeen/metron.svg)](https://pkg.go.dev/github.com/mdabydeen/metron)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/mdabydeen/metron/badge)](https://scorecard.dev/viewer/?uri=github.com/mdabydeen/metron)
 
 A minimal, terminal-based coding agent that talks to a **local** [Ollama](https://ollama.com)
 model. Its one defining constraint is **token discipline**: the model never reads a whole
@@ -48,7 +49,8 @@ the table. The tool surface is what makes that instruction enforceable rather th
 
 ## Requirements
 
-- **Go 1.26+** to build.
+- **Go 1.26.6+** to build. The patch floor is security-sensitive because released binaries
+  include the Go standard library.
 - **A running Ollama server** with a **tool-capable** model pulled. Tool calling is not
   optional here — without it the agent cannot see your code at all. Check with
   `curl -s localhost:11434/api/tags | grep tools`.
@@ -80,6 +82,18 @@ go run ./cmd/metron   # run without building
 
 `go install` does not stamp a version, so `metron --version` reports `dev` for those builds.
 Released binaries and `make build` both carry the real one.
+
+After installation, run `metron --doctor`. It checks the resolved project and
+configuration, required local binaries, Ollama connectivity, the configured model, and
+whether that model advertises tool support. It performs no inference and exits non-zero
+when the setup is incomplete, so it is also suitable for bootstrap scripts.
+
+Release archives include SPDX SBOMs and GitHub build-provenance attestations. After
+downloading an archive, verify its origin with:
+
+```bash
+gh attestation verify metron_<version>_<os>_<arch>.tar.gz --repo mdabydeen/metron
+```
 
 ## Usage
 
@@ -122,6 +136,7 @@ written to disk.
 | --- | --- |
 | `-p`, `--prompt` | run one request non-interactively and exit |
 | `--yes` | apply patches without asking (required by `-p` to edit files) |
+| `--doctor` | check dependencies, Ollama connectivity and model tool support, then exit |
 | `--version` | print the version and exit |
 | `-h` | list the flags |
 
@@ -167,7 +182,7 @@ JSON, and every key is optional — anything you leave out keeps its default. me
 first file it finds:
 
 1. `$METRON_CONFIG`, if set (an explicit path short-circuits the search)
-2. `./.metron.json` — per-project, next to the code you are working on
+2. `<repository-root>/.metron.json` — per-project, found even when metron starts in a subdirectory
 3. `$XDG_CONFIG_HOME/metron/config.json`, else `~/.config/metron/config.json`
 
 Copy [`metron.example.json`](metron.example.json) to get started; it lists every key at its
@@ -186,6 +201,7 @@ cp metron.example.json .metron.json
 | `temperature` | `0.1` | sampling temperature |
 | `top_p` | `0.95` | nucleus sampling cutoff |
 | `num_ctx` | `16384` | context window requested from Ollama |
+| `max_output_tokens` | `4096` | maximum tokens Ollama may generate in one model call |
 | `max_turns` | `10` | model round-trips allowed in one user turn |
 | `compact_threshold_bytes` | `400` | tool output above this size is purged after the turn |
 | `max_history_messages` | `60` | messages kept after a turn, excluding the system prompt |
@@ -203,6 +219,10 @@ cp metron.example.json .metron.json
 A file that exists but cannot be read or parsed is a startup error, not a silent fallback —
 including unknown keys, so a typo like `"modle"` is reported instead of ignored. Values are
 validated (positive budgets, `top_p` in `(0, 1]`) before the agent starts.
+
+`max_output_tokens` is sent to Ollama as `num_predict`. This makes every model call finite;
+Ollama's own default permits unlimited generation. The limit applies separately to each
+round-trip in an agent turn, including replies that request tools.
 
 **The default model is probably not yours.** `qwen2.5-coder:32b` is a placeholder; set `model`
 to something you have actually pulled and that reports the `tools` capability.
@@ -442,7 +462,7 @@ make docker-race    # ... with the race detector
 make docker-cover   # ... with a coverage total
 ```
 
-The image ([`Dockerfile.test`](Dockerfile.test)) is `golang:1.26-alpine` plus ripgrep,
+The image ([`Dockerfile.test`](Dockerfile.test)) is `golang:1.27-alpine` plus ripgrep,
 Universal Ctags, git and a C toolchain, and it runs the tests **unprivileged on purpose**:
 several cases assert on permission failures, which root would bypass and silently skip.
 `docker-compose.yml` exposes the same three runs as services.
@@ -454,7 +474,7 @@ ever have noticed.
 
 > If `docker pull` hangs on your machine with `error getting credentials`, the Docker
 > credential helper is the problem, not the image:
-> `DOCKER_CONFIG=$(mktemp -d) docker pull golang:1.26-alpine` does an anonymous pull.
+> `DOCKER_CONFIG=$(mktemp -d) docker pull golang:1.27-alpine` does an anonymous pull.
 
 ### 3. Live (real model)
 
@@ -490,15 +510,17 @@ and not to retry, it tried once, fell back to `view_slice`, and finished the job
 
 ## Limitations
 
-- No fallback if `rg` or a compatible `ctags` is missing; the affected tool reports the error
-  to the model and the startup check warns you.
+- No built-in fallback if `rg` or a compatible `ctags` is missing; the affected tools are
+  withheld from the model and the startup check warns you.
 - `.tags` is built once and never invalidated automatically — use `/tags`.
 - Trimming history drops the oldest exchanges silently; the model is not told that earlier
   context is gone.
 - Conversation history is lost when you exit.
-- The agent cannot run anything, so it cannot check whether its own edit worked.
+- Command execution must be explicitly allowlisted, so the default configuration cannot run
+  tests after an edit.
 
-These are being addressed. See [CHANGELOG.md](CHANGELOG.md) for what has landed.
+See the [project maturity audit and roadmap](PROJECT_AUDIT.md) for prioritized gaps, and
+[CHANGELOG.md](CHANGELOG.md) for what has landed.
 
 ## Contributing
 
