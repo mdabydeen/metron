@@ -79,7 +79,13 @@ does the job.
   metron at a repository containing secrets, and the model reads them, they are
   in the conversation. With a local Ollama server that conversation does not
   leave your machine; that property is a consequence of your configuration, not
-  something metron enforces.
+  something metron enforces. metron does guard the path: the endpoint is checked
+  to be an http(s) URL with a host before any request is built (so a config
+  pointing at `file://`, `ftp://`, or a host-less endpoint cannot be turned into
+  an exfiltration channel), and metron warns on stderr whenever the configured
+  endpoint is not reached over loopback -- since that is the moment the
+  conversation starts leaving the machine, over a transport an attacker may be
+  able to read.
 - **Confinement is the project directory, not a sandbox.** Everything inside the
   project is fair game, including files you would rather the model not read.
   There is no per-file policy and no allowlist.
@@ -99,6 +105,10 @@ approval prompt, and does not claim to.
 
 - No telemetry, no analytics, no crash reporting, no network calls other than to the
   endpoint you configure.
+- The endpoint a config names is checked to be an http(s) URL with a host before
+  any request is built; a `file://`, `ftp://` or host-less endpoint cannot be
+  turned into a network call, and a non-loopback target is announced on stderr so
+  a config that ships the conversation away is not a silent one.
 - No credentials of any kind are read or stored. There is no login and no account.
 - No shell. External binaries (`rg`, `ctags`, `git`) are invoked with an explicit argument
   vector, never through `sh -c`, so a model-supplied string cannot become a shell command.

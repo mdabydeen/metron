@@ -352,6 +352,31 @@ func TestRunMainStartsAndExitsCleanly(t *testing.T) {
 	}
 }
 
+// TestRunMainWarnsOnANonLoopbackEndpoint is the operator-facing half of the
+// exfiltration guard: a config that sends the conversation off the machine must
+// say so on stderr, whether the operator is about to run the REPL or a one-shot.
+func TestRunMainWarnsOnANonLoopbackEndpoint(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("METRON_CONFIG", "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("OLLAMA_HOST", "http://169.254.169.254:80/attack/api/chat")
+	t.Setenv("OLLAMA_MODEL", "attacker")
+
+	var out, errOut bytes.Buffer
+	// "exit" still reaches the agent wiring, where the notice is emitted.
+	code := runMain(nil, strings.NewReader("exit\n"), &out, &errOut)
+
+	if code != 0 {
+		t.Fatalf("runMain() = %d, want 0", code)
+	}
+	if !strings.Contains(errOut.String(), "169.254.169.254") {
+		t.Fatalf("stderr = %q, want the non-loopback endpoint named", errOut.String())
+	}
+	if strings.Contains(out.String(), "169.254.169.254") {
+		t.Fatalf("stdout = %q, want the warning kept off the model stream", out.String())
+	}
+}
+
 func TestRunMainLoadsProjectConfigFromNestedDirectory(t *testing.T) {
 	root := t.TempDir()
 	t.Chdir(root)
@@ -800,9 +825,9 @@ func TestRunDoctorReportsReadySetup(t *testing.T) {
 	}
 	t.Setenv("PATH", bin)
 	cfg := cfgFor("tool-model")
-	var out bytes.Buffer
+	var out, errOut bytes.Buffer
 
-	code := runDoctor(context.Background(), &out, cfg, "/tmp/metron.json", testEnv(t),
+	code := runDoctor(context.Background(), &out, &errOut, cfg, "/tmp/metron.json", testEnv(t),
 		fakeProber{info: ollama.ModelInfo{Capabilities: []string{"completion", "tools"}}})
 
 	if code != 0 {
@@ -817,9 +842,9 @@ func TestRunDoctorReportsReadySetup(t *testing.T) {
 
 func TestRunDoctorReportsEveryIssue(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
-	var out bytes.Buffer
+	var out, errOut bytes.Buffer
 
-	code := runDoctor(context.Background(), &out, cfgFor("plain-model"), "", testEnv(t),
+	code := runDoctor(context.Background(), &out, &errOut, cfgFor("plain-model"), "", testEnv(t),
 		fakeProber{info: ollama.ModelInfo{Capabilities: []string{"completion"}}})
 
 	if code != 1 {
@@ -834,11 +859,35 @@ func TestRunDoctorReportsEveryIssue(t *testing.T) {
 
 func TestRunDoctorReportsProbeFailure(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
-	var out bytes.Buffer
-	code := runDoctor(context.Background(), &out, cfgFor("m"), "", testEnv(t),
+	var out, errOut bytes.Buffer
+	code := runDoctor(context.Background(), &out, &errOut, cfgFor("m"), "", testEnv(t),
 		fakeProber{err: errors.New("server offline")})
 	if code != 1 || !strings.Contains(out.String(), "ollama: fail (server offline)") {
 		t.Fatalf("runDoctor() = %d, output %q", code, out.String())
+	}
+}
+
+// TestRunDoctorAnnouncesANonLoopbackEndpoint pins the doctor's half of the
+// exfiltration notice: a config that points off the machine is announced on
+// stderr without failing an otherwise-healthy diagnosis.
+func TestRunDoctorAnnouncesANonLoopbackEndpoint(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	cfg := cfgFor("m")
+	cfg.Endpoint = "http://169.254.169.254:80/api/chat"
+
+	var out, errOut bytes.Buffer
+	runDoctor(context.Background(), &out, &errOut, cfg, "", testEnv(t),
+		fakeProber{info: ollama.ModelInfo{Capabilities: []string{"tools"}}})
+	// The notice is a warning, not a failing check, so it must not appear on the
+	// line-oriented stdout and must not change a result that a missing git repo
+	// already decided. The doctor's "ollama: ok" line legitimately echoes the
+	// whole endpoint on stdout, so the marker for the exfiltration notice is the
+	// notice's own wording, not the host.
+	if !strings.Contains(errOut.String(), "not a loopback Ollama") {
+		t.Fatalf("stderr = %q, want the non-loopback endpoint announced", errOut.String())
+	}
+	if strings.Contains(out.String(), "not a loopback Ollama") {
+		t.Fatalf("stdout = %q, want the exfiltration notice kept off the line-oriented report", out.String())
 	}
 }
 

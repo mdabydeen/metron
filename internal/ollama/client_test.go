@@ -266,6 +266,8 @@ func TestChatReportsUnmarshalableTools(t *testing.T) {
 }
 
 func TestChatReportsInvalidEndpoint(t *testing.T) {
+	// An endpoint that is not parseable is not exfiltration -- it reaches no host
+	// -- so the guard defers it and the request layer reports it.
 	_, err := NewClient(":://not a url", "m", DefaultOptions()).Chat(context.Background(), nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "create request") {
 		t.Fatalf("Chat() error = %v, want a request-construction error", err)
