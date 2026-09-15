@@ -100,11 +100,13 @@ func runMain(args []string, in io.Reader, out, errOut io.Writer) int {
 	// Otherwise a launch from pkg/deep would operate on the repository root but
 	// silently ignore the .metron.json stored there.
 	projectRoot := tools.NewEnv(tools.DefaultBudgets()).Root
-	cfg, path, err := config.LoadFrom(projectRoot)
+	res, err := config.LoadFrom(projectRoot)
 	if err != nil {
 		fmt.Fprintf(errOut, "\033[31mconfig error: %v\033[0m\n", err)
 		return 1
 	}
+	cfg := res.Config
+	path := res.Path
 
 	clientOpts := ollama.Options{
 		Temperature:     cfg.Temperature,
@@ -143,7 +145,7 @@ func runMain(args []string, in io.Reader, out, errOut io.Writer) int {
 	}}
 	env.Allowed = tools.ParseAllowlist(cfg.AllowedCommands)
 	if f.doctor {
-		return runDoctor(context.Background(), out, errOut, cfg, path, env, client)
+		return runDoctor(context.Background(), out, errOut, cfg, path, res.Warnings, env, client)
 	}
 	// The local model is what keeps the conversation on the machine. A config
 	// that points elsewhere is a data-exfiltration surface, so say so on stderr:
@@ -151,6 +153,9 @@ func runMain(args []string, in io.Reader, out, errOut io.Writer) int {
 	if w := ollama.EndpointWarning(cfg.Endpoint); w != "" {
 		fmt.Fprintf(errOut, "\033[33mwarning: %s\033[0m\n", w)
 	}
+	// A capability a config enabled -- or a project file tried to -- concerns the
+	// operator as much as a non-loopback endpoint does, so say so on stderr too.
+	writeCapabilityWarnings(errOut, res.Warnings, path, true)
 	opts := agent.Options{
 		MaxTurns:           cfg.MaxTurns,
 		CompactThreshold:   cfg.CompactThreshold,
@@ -159,15 +164,19 @@ func runMain(args []string, in io.Reader, out, errOut io.Writer) int {
 		DisabledTools:      cfg.DisabledTools,
 		Progress:           out,
 	}
-	autoApprove := cfg.AutoApprovePatches || f.yes
+	// The approval decision is ordered so the one-shot contract is absolute:
+	// without --yes and nobody at the keyboard, patches are refused no matter what
+	// the config says. --yes is the only override, and a config may auto-approve
+	// only in the interactive case where an operator is present to be told about it.
 	switch {
-	case autoApprove:
-		// nil approver: apply without asking.
+	case f.yes:
+		// nil approver: --yes is the explicit scripted override in any mode.
 	case f.prompt != "":
-		// Nobody is at the keyboard to answer, so fail closed rather than
-		// block forever or edit the tree unattended.
+		// One-shot without --yes: fail closed rather than block or edit unattended.
 		opts.Approve = func(string, string) bool { return false }
 		opts.Progress = errOut
+	case cfg.AutoApprovePatches:
+		// Interactive, config opted in: apply without prompting.
 	default:
 		opts.Approve = func(kind, preview string) bool { return approve(out, scanner, kind, preview) }
 	}
@@ -188,7 +197,7 @@ type modelProber interface {
 // runDoctor checks everything needed for a useful first run without loading a
 // model or changing the project. Its exit code makes it usable as a setup and
 // CI health check, while the line-oriented output stays easy to diagnose.
-func runDoctor(ctx context.Context, out, errOut io.Writer, cfg config.Config, cfgPath string, env tools.Env, prober modelProber) int {
+func runDoctor(ctx context.Context, out, errOut io.Writer, cfg config.Config, cfgPath string, capWarnings []string, env tools.Env, prober modelProber) int {
 	if cfgPath == "" {
 		cfgPath = "built-in defaults"
 	}
@@ -202,6 +211,9 @@ func runDoctor(ctx context.Context, out, errOut io.Writer, cfg config.Config, cf
 	if w := ollama.EndpointWarning(cfg.Endpoint); w != "" {
 		fmt.Fprintf(errOut, "%s\n", w)
 	}
+	// The capabilities a config enabled -- or a project file tried to -- are part
+	// of a first-run diagnosis, so they land here alongside the endpoint notice.
+	writeCapabilityWarnings(errOut, capWarnings, cfgPath, false)
 
 	ready := true
 	warnings := env.Preflight()
@@ -233,6 +245,25 @@ func runDoctor(ctx context.Context, out, errOut io.Writer, cfg config.Config, cf
 	}
 	fmt.Fprintln(out, "doctor: ready")
 	return 0
+}
+
+// writeCapabilityWarnings keeps the operator-facing capability notices
+// consistent between startup and --doctor. The loader supplies the warning
+// text, while the CLI knows the selected path and adds it so an operator can
+// distinguish a trusted config from a project's attempted privilege increase.
+func writeCapabilityWarnings(out io.Writer, warnings []string, cfgPath string, color bool) {
+	source := cfgPath
+	if source == "" {
+		source = "built-in defaults"
+	}
+	for _, warning := range warnings {
+		warning = fmt.Sprintf("%s (source: %s)", warning, source)
+		if color {
+			fmt.Fprintf(out, "\033[33mwarning: %s\033[0m\n", warning)
+		} else {
+			fmt.Fprintf(out, "warning: %s\n", warning)
+		}
+	}
 }
 
 // oneShot runs a single request and prints only the answer on stdout, so

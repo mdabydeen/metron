@@ -18,6 +18,7 @@ func isolate(t *testing.T) string {
 	t.Chdir(dir)
 	t.Setenv("METRON_CONFIG", "")
 	t.Setenv("METRON_CONFIG_DIR", dir)
+	t.Setenv("METRON_ALLOW_PROJECT_COMMANDS", "")
 	t.Setenv("OLLAMA_HOST", "")
 	t.Setenv("OLLAMA_MODEL", "")
 	return dir
@@ -32,7 +33,8 @@ func TestDefaultsAreValid(t *testing.T) {
 func TestLoadWithoutAnyConfigFile(t *testing.T) {
 	isolate(t)
 
-	cfg, path, err := Load()
+	res, err := Load()
+	cfg, path := res.Config, res.Path
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
@@ -50,12 +52,16 @@ func TestLoadReadsProjectFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg, path, err := Load()
+	res, err := Load()
+	cfg, path := res.Config, res.Path
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
 	if path != ProjectFile {
 		t.Fatalf("path = %q, want %q", path, ProjectFile)
+	}
+	if res.Source != SourceProject {
+		t.Fatalf("source = %v, want SourceProject", res.Source)
 	}
 	if cfg.Model != "gemma4:12b-mlx" || cfg.MaxSliceLines != 40 {
 		t.Fatalf("Load() = %+v, want the file's values", cfg)
@@ -78,7 +84,8 @@ func TestLoadFromReadsProjectRootOutsideCurrentDirectory(t *testing.T) {
 	}
 	t.Chdir(nested)
 
-	cfg, path, err := LoadFrom(project)
+	res, err := LoadFrom(project)
+	cfg, path := res.Config, res.Path
 	if err != nil {
 		t.Fatalf("LoadFrom() error = %v", err)
 	}
@@ -99,15 +106,41 @@ func TestLoadFallsBackToUserFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg, path, err := Load()
+	res, err := Load()
+	cfg, path := res.Config, res.Path
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
 	if path != userFile {
 		t.Fatalf("path = %q, want %q", path, userFile)
 	}
+	if res.Source != SourceUser {
+		t.Fatalf("source = %v, want SourceUser", res.Source)
+	}
 	if cfg.Model != "from-user-file" {
 		t.Fatalf("model = %q, want the user file's value", cfg.Model)
+	}
+}
+
+func TestLoadReadsHomeConfig(t *testing.T) {
+	isolate(t)
+	home := t.TempDir()
+	t.Setenv("METRON_CONFIG_DIR", "")
+	t.Setenv("HOME", home)
+	userFile := filepath.Join(home, ".metron", "config.json")
+	if err := os.MkdirAll(filepath.Dir(userFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(userFile, []byte(`{"model":"from-home"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if res.Path != userFile || res.Source != SourceUser || res.Config.Model != "from-home" {
+		t.Fatalf("Load() = model %q from %q (source %v), want the home config as SourceUser", res.Config.Model, res.Path, res.Source)
 	}
 }
 
@@ -117,19 +150,23 @@ func TestProjectFileWinsOverUserFile(t *testing.T) {
 	if err := os.MkdirAll(userDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(userDir, "config.json"), []byte(`{"model":"user"}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(userDir, "config.json"), []byte(`{"model":"user","auto_approve_patches":true,"allowed_commands":["go test"]}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(ProjectFile, []byte(`{"model":"project"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	cfg, path, err := Load()
+	res, err := Load()
+	cfg, path := res.Config, res.Path
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
 	if cfg.Model != "project" || path != ProjectFile {
 		t.Fatalf("Load() = %q from %q, want the project file to win", cfg.Model, path)
+	}
+	if cfg.AutoApprovePatches || len(cfg.AllowedCommands) != 0 {
+		t.Fatalf("Load() = %+v, want user-file privileges excluded when the project file wins", cfg)
 	}
 }
 
@@ -145,12 +182,16 @@ func TestMetronConfigOverridesTheSearch(t *testing.T) {
 	}
 	t.Setenv("METRON_CONFIG", explicit)
 
-	cfg, path, err := Load()
+	res, err := Load()
+	cfg, path := res.Config, res.Path
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
 	if cfg.Model != "explicit" || path != explicit {
 		t.Fatalf("Load() = %q from %q, want the explicit file", cfg.Model, path)
+	}
+	if res.Source != SourceExplicit {
+		t.Fatalf("source = %v, want SourceExplicit", res.Source)
 	}
 }
 
@@ -162,9 +203,13 @@ func TestEnvironmentOverridesTheFile(t *testing.T) {
 	t.Setenv("OLLAMA_MODEL", "from-env")
 	t.Setenv("OLLAMA_HOST", "http://env/api/chat")
 
-	cfg, _, err := Load()
+	res, err := Load()
+	cfg := res.Config
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
+	}
+	if res.Source != SourceProject || res.Path != ProjectFile {
+		t.Fatalf("source = %v, path = %q, want the project source and path despite environment overrides", res.Source, res.Path)
 	}
 	if cfg.Model != "from-env" || cfg.Endpoint != "http://env/api/chat" {
 		t.Fatalf("Load() = %+v, want the environment to win", cfg)
@@ -177,8 +222,30 @@ func TestLoadRejectsMalformedJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, _, err := Load(); err == nil || !strings.Contains(err.Error(), "parse config") {
+	res, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "parse config") {
 		t.Fatalf("Load() error = %v, want a parse error", err)
+	}
+	if res.Path != ProjectFile || res.Source != SourceProject {
+		t.Fatalf("error result = path %q, source %v, want the failing project source", res.Path, res.Source)
+	}
+}
+
+func TestLoadReadErrorRetainsSourceContext(t *testing.T) {
+	isolate(t)
+	if err := os.Mkdir(ProjectFile, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "read config") {
+		t.Fatalf("Load() error = %v, want a read error", err)
+	}
+	if res.Path != ProjectFile || res.Source != SourceProject {
+		t.Fatalf("error result = path %q, source %v, want the failing project source", res.Path, res.Source)
+	}
+	if !reflect.DeepEqual(res.Config, Defaults()) {
+		t.Fatalf("error result config = %+v, want the defaults retained", res.Config)
 	}
 }
 
@@ -188,7 +255,7 @@ func TestLoadRejectsUnknownFields(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, _, err := Load()
+	_, err := Load()
 	if err == nil || !strings.Contains(err.Error(), "modle") {
 		t.Fatalf("Load() error = %v, want the unknown field named", err)
 	}
@@ -204,7 +271,7 @@ func TestLoadRejectsUnreadableFile(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(ProjectFile, 0o644) })
 
-	if _, _, err := Load(); err == nil || !strings.Contains(err.Error(), "read config") {
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "read config") {
 		t.Fatalf("Load() error = %v, want a read error", err)
 	}
 }
@@ -215,9 +282,12 @@ func TestLoadRejectsInvalidSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, _, err := Load()
+	res, err := Load()
 	if err == nil || !strings.Contains(err.Error(), "max_turns must be > 0") {
 		t.Fatalf("Load() error = %v, want validation to reject it", err)
+	}
+	if res.Config.MaxTurns != 0 || res.Path != ProjectFile || res.Source != SourceProject {
+		t.Fatalf("error result = %+v from %q (source %v), want invalid project config preserved", res.Config, res.Path, res.Source)
 	}
 }
 
@@ -372,5 +442,184 @@ func TestValidateRejectsNonPositiveCommandBudgets(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), tc.name) {
 			t.Errorf("Validate() error = %v, want %s rejected", err, tc.name)
 		}
+	}
+}
+
+// The tests below pin the trust boundary: a project file is untrusted data and
+// may not raise the operator's privileges, while the operator's own settings --
+// user file or METRON_CONFIG -- may.
+
+func TestProjectFileCannotRaisePrivileges(t *testing.T) {
+	isolate(t)
+	if err := os.WriteFile(ProjectFile, []byte(`{"auto_approve_patches":true,"allowed_commands":["go test","make"]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if res.Source != SourceProject {
+		t.Fatalf("Source = %v, want SourceProject", res.Source)
+	}
+	if res.Config.AutoApprovePatches {
+		t.Fatal("AutoApprovePatches survived a project file, want it stripped")
+	}
+	if len(res.Config.AllowedCommands) != 0 {
+		t.Fatalf("AllowedCommands = %v, want it stripped from a project file", res.Config.AllowedCommands)
+	}
+	joined := strings.Join(res.Warnings, "\n")
+	for _, want := range []string{
+		"requested auto_approve_patches", "ignored",
+		"requested allowed_commands", "METRON_ALLOW_PROJECT_COMMANDS",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("warnings = %q, want it to mention %q", joined, want)
+		}
+	}
+}
+
+func TestProjectSafeSettingsAreKept(t *testing.T) {
+	isolate(t)
+	if err := os.WriteFile(ProjectFile, []byte(`{"model":"gemma4:12b","max_slice_lines":40}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if res.Config.Model != "gemma4:12b" || res.Config.MaxSliceLines != 40 {
+		t.Fatalf("safe project settings = %+v, want them kept", res.Config)
+	}
+	if len(res.Warnings) != 0 {
+		t.Fatalf("warnings = %v, want none for a project file that raises no privilege", res.Warnings)
+	}
+}
+
+func TestProjectAllowedCommandsHonourOperatorOptIn(t *testing.T) {
+	isolate(t)
+	if err := os.WriteFile(ProjectFile, []byte(`{"auto_approve_patches":true,"allowed_commands":["go test"]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("METRON_ALLOW_PROJECT_COMMANDS", "1")
+
+	res, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(res.Config.AllowedCommands) != 1 || res.Config.AllowedCommands[0] != "go test" {
+		t.Fatalf("AllowedCommands = %v, want the operator-opted-in grant kept", res.Config.AllowedCommands)
+	}
+	if res.Config.AutoApprovePatches {
+		t.Fatal("AutoApprovePatches survived the project command opt-in, want it stripped regardless of opt-in")
+	}
+	joined := strings.Join(res.Warnings, "\n")
+	if !strings.Contains(joined, "you opted in") {
+		t.Fatalf("warnings = %q, want the opt-in announced", joined)
+	}
+	if !strings.Contains(joined, "allowed_commands is non-empty") {
+		t.Fatalf("warnings = %q, want the effective capability named", joined)
+	}
+}
+
+func TestExplicitSourceMayRaisePrivileges(t *testing.T) {
+	dir := isolate(t)
+	userDir := filepath.Join(dir, ".metron")
+	if err := os.MkdirAll(userDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(userDir, "config.json"), []byte(`{"model":"user","auto_approve_patches":false,"allowed_commands":[]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ProjectFile, []byte(`{"model":"project","auto_approve_patches":false,"allowed_commands":[]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	explicit := filepath.Join(t.TempDir(), "explicit.json")
+	if err := os.WriteFile(explicit, []byte(`{"model":"explicit","auto_approve_patches":true,"allowed_commands":["go test"]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("METRON_CONFIG", explicit)
+	t.Setenv("OLLAMA_MODEL", "environment")
+	t.Setenv("OLLAMA_HOST", "http://environment/api/chat")
+
+	res, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if res.Source != SourceExplicit {
+		t.Fatalf("Source = %v, want SourceExplicit", res.Source)
+	}
+	if res.Config.Model != "environment" || res.Config.Endpoint != "http://environment/api/chat" {
+		t.Fatalf("explicit source = %+v, want environment values to override the explicit file", res.Config)
+	}
+	if !res.Config.AutoApprovePatches || len(res.Config.AllowedCommands) != 1 {
+		t.Fatalf("explicit source = %+v, want its privileges kept", res.Config)
+	}
+	joined := strings.Join(res.Warnings, "\n")
+	for _, want := range []string{"auto_approve_patches is enabled", "allowed_commands is non-empty"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("warnings = %q, want the effective capability named: %q", joined, want)
+		}
+	}
+	for _, mustNot := range []string{"ignored", "you opted in"} {
+		if strings.Contains(joined, mustNot) {
+			t.Errorf("warnings = %q, do not want a project-file notice for an explicit file", joined)
+		}
+	}
+}
+
+func TestUserSourceMayRaisePrivileges(t *testing.T) {
+	dir := isolate(t)
+	userDir := filepath.Join(dir, ".metron")
+	if err := os.MkdirAll(userDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(userDir, "config.json"), []byte(`{"auto_approve_patches":true,"allowed_commands":["go test"]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if res.Source != SourceUser {
+		t.Fatalf("Source = %v, want SourceUser", res.Source)
+	}
+	if !res.Config.AutoApprovePatches || len(res.Config.AllowedCommands) != 1 || res.Config.AllowedCommands[0] != "go test" {
+		t.Fatalf("user source = %+v, want both operator-configured capabilities kept", res.Config)
+	}
+}
+
+func TestDefaultSourceHasNoWarnings(t *testing.T) {
+	isolate(t)
+
+	res, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if res.Source != SourceDefault {
+		t.Fatalf("Source = %v, want SourceDefault", res.Source)
+	}
+	if len(res.Warnings) != 0 {
+		t.Fatalf("warnings = %v, want none for the built-in defaults", res.Warnings)
+	}
+}
+
+func TestOptInProjectCommandsTruthiness(t *testing.T) {
+	tests := []struct {
+		val  string
+		want bool
+	}{
+		{"1", true}, {"true", true}, {"yes", true}, {"TRUE", true}, {" 1 ", true},
+		{"", false}, {"0", false}, {"no", false}, {"maybe", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.val, func(t *testing.T) {
+			t.Setenv("METRON_ALLOW_PROJECT_COMMANDS", tc.val)
+			if got := optInProjectCommands(); got != tc.want {
+				t.Fatalf("optInProjectCommands(%q) = %v, want %v", tc.val, got, tc.want)
+			}
+		})
 	}
 }

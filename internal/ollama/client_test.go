@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -469,5 +470,103 @@ func TestChatIdleTimeoutCancelsAStalledRequest(t *testing.T) {
 
 	if err == nil {
 		t.Fatal("Chat() = nil error, want the idle watchdog to give up")
+	}
+}
+
+// TestChatFollowsASameHostRedirect proves the redirect guard permits the one
+// hop Ollama itself never makes but that is harmless: a redirect that stays on
+// the host the operator configured. The client is built from the real
+// http.Client, so the follow is genuine.
+func TestChatFollowsASameHostRedirect(t *testing.T) {
+	var second bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !second {
+			second = true
+			http.Redirect(w, r, "/api/chat", http.StatusFound)
+			return
+		}
+		json.NewEncoder(w).Encode(ChatResponse{
+			Message: Message{Role: "assistant", Content: "after redirect"},
+			Done:    true,
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "m", DefaultOptions())
+	got, err := c.Chat(context.Background(), nil, nil)
+	if err != nil {
+		t.Fatalf("Chat() error = %v, want the same-host redirect followed", err)
+	}
+	if got.Content != "after redirect" {
+		t.Fatalf("Chat() content = %q, want the reply past the redirect", got.Content)
+	}
+}
+
+// TestChatRefusesACrossHostRedirect is the exfiltration case the guard exists
+// for: a host that redirects the chat request to a different host must not let
+// the conversation follow, because the operator only chose the first host.
+func TestChatRefusesACrossHostRedirect(t *testing.T) {
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("cross-host redirect was followed to %s", r.URL)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer other.Close()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL, http.StatusFound)
+	}))
+	defer srv.Close()
+
+	_, err := NewClient(srv.URL, "m", DefaultOptions()).Chat(context.Background(), nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "redirect") {
+		t.Fatalf("Chat() error = %v, want a cross-host redirect refusal", err)
+	}
+}
+
+// TestChatRefusesARedirectToAForeignScheme covers the second half of the guard:
+// a hop onto a scheme that is not http(s) -- here ftp, the same exfiltration
+// channel the endpoint guard already closes -- is refused even when it keeps the
+// host the operator configured.
+func TestChatRefusesARedirectToAForeignScheme(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "ftp://"+r.Host+"/steal", http.StatusFound)
+	}))
+	defer srv.Close()
+
+	_, err := NewClient(srv.URL, "m", DefaultOptions()).Chat(context.Background(), nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "redirect") {
+		t.Fatalf("Chat() error = %v, want a foreign-scheme redirect refusal", err)
+	}
+}
+
+// TestChatRefusesAnHTTPSDowngrade covers a redirect that stays on the same
+// authority but would move the conversation from encrypted HTTPS to cleartext
+// HTTP. The configured transport trusts the test server; the target is never
+// contacted because the redirect guard rejects the scheme change first.
+func TestChatRefusesAnHTTPSDowngrade(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://"+r.Host+"/api/chat", http.StatusFound)
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "m", DefaultOptions())
+	c.http.Transport = srv.Client().Transport
+	_, err := c.Chat(context.Background(), nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "redirect") {
+		t.Fatalf("Chat() error = %v, want an HTTPS downgrade refusal", err)
+	}
+}
+
+func TestCheckRedirectRejectsMalformedArguments(t *testing.T) {
+	if err := checkRedirect(nil, nil); err == nil {
+		t.Fatal("checkRedirect(nil, nil) = nil, want a refusal")
+	}
+}
+
+func TestCheckRedirectRejectsAnUnsafeSameHostScheme(t *testing.T) {
+	unsafe := &http.Request{URL: &url.URL{Scheme: "ftp", Host: "example.invalid"}}
+	via := []*http.Request{{URL: &url.URL{Scheme: "ftp", Host: "example.invalid"}}}
+	if err := checkRedirect(unsafe, via); err == nil {
+		t.Fatal("checkRedirect() = nil, want a non-http(s) scheme refusal")
 	}
 }

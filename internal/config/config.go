@@ -132,42 +132,92 @@ func SearchFrom(projectRoot string) []string {
 	return paths
 }
 
-// Load resolves the configuration: defaults, overlaid with the first config
-// file found, overlaid with the environment. The returned path is the file
-// that was used, or "" if none was found.
+// Source names where the effective configuration came from. It is the axis the
+// trust boundary turns on: a project's .metron.json is data the repository
+// ships, so it must not be able to raise the privileges of the operator's own
+// settings, whereas the operator's own file -- or a file METRON_CONFIG names --
+// may.
+type Source int
+
+const (
+	// SourceDefault means no config file was found; the built-in defaults apply.
+	SourceDefault Source = iota
+	// SourceProject is the repository's .metron.json.
+	SourceProject
+	// SourceUser is the operator's own configuration, under METRON_CONFIG_DIR or
+	// the home directory.
+	SourceUser
+	// SourceExplicit is the file METRON_CONFIG points at, which the operator chose
+	// and so may carry any capability.
+	SourceExplicit
+)
+
+// Result is what configuration loading resolves: the effective settings, where
+// they came from, and the operator-facing warnings that come with that source.
+type Result struct {
+	Config   Config
+	Path     string
+	Source   Source
+	Warnings []string
+}
+
+// sourceForIndex classifies the winning search entry. A METRON_CONFIG file is
+// always the sole entry, so an explicit file is trusted whole; otherwise the
+// first entry is the project file and the second is the operator's.
+func sourceForIndex(explicit bool, index int) Source {
+	if explicit {
+		return SourceExplicit
+	}
+	if index == 0 {
+		return SourceProject
+	}
+	return SourceUser
+}
+
+// Load resolves the configuration: built-in defaults, overlaid with the first
+// config file found, overlaid with the environment. The returned Result says
+// where the settings came from and carries the operator-facing warnings that
+// source implies.
 //
 // A file that exists but cannot be read or parsed is an error rather than a
 // silent fallback -- a typo in a config file should not quietly change how the
-// agent behaves.
-func Load() (Config, string, error) {
+// agent behaves. On error, the Result retains the attempted path, source, and
+// any configuration values decoded before the failure for caller diagnostics.
+func Load() (Result, error) {
 	return LoadFrom("")
 }
 
 // LoadFrom resolves configuration like Load, but reads the project file from
 // projectRoot. This keeps the package useful to callers that want cwd-based
 // lookup while allowing the CLI to use the same repository root as its tools.
-func LoadFrom(projectRoot string) (Config, string, error) {
+func LoadFrom(projectRoot string) (Result, error) {
 	cfg := Defaults()
+	result := Result{Config: cfg, Source: SourceDefault}
 
-	var used string
-	for _, path := range SearchFrom(projectRoot) {
+	// The search order is a trust order: the project file comes first so it can
+	// customise the project, but that is exactly why it is the one we police.
+	explicit := os.Getenv("METRON_CONFIG") != ""
+	for index, path := range SearchFrom(projectRoot) {
 		data, err := os.ReadFile(path)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
+		result.Path = path
+		result.Source = sourceForIndex(explicit, index)
 		if err != nil {
-			return cfg, path, fmt.Errorf("read config %s: %w", path, err)
+			return result, fmt.Errorf("read config %s: %w", path, err)
 		}
 		dec := json.NewDecoder(strings.NewReader(string(data)))
 		dec.DisallowUnknownFields()
 		if err := dec.Decode(&cfg); err != nil {
-			return cfg, path, fmt.Errorf("parse config %s: %w", path, err)
+			result.Config = cfg
+			return result, fmt.Errorf("parse config %s: %w", path, err)
 		}
-		used = path
 		break
 	}
 
-	// The environment wins, so a one-off override needs no file edit.
+	// The environment wins, so a one-off override needs no file edit. These are
+	// operator-level and may set anything.
 	if v := os.Getenv("OLLAMA_HOST"); v != "" {
 		cfg.Endpoint = v
 	}
@@ -175,10 +225,63 @@ func LoadFrom(projectRoot string) (Config, string, error) {
 		cfg.Model = v
 	}
 
+	// The trust boundary and the warnings it produces both belong to loading, so
+	// they are settled here and handed to the caller rather than the REPL.
+	result.Warnings = applyProjectPolicy(&cfg, result.Source)
+
 	if err := cfg.Validate(); err != nil {
-		return cfg, used, err
+		result.Config = cfg
+		return result, err
 	}
-	return cfg, used, nil
+	result.Config = cfg
+	return result, nil
+}
+
+// applyProjectPolicy enforces the trust boundary and returns the warnings a
+// source implies. A project file is the one source that may not raise
+// privileges, so its dangerous fields are stripped unless the operator opted in;
+// every source is then warned about the capabilities that actually took effect.
+func applyProjectPolicy(cfg *Config, source Source) []string {
+	var warnings []string
+
+	if source == SourceProject {
+		// A project is untrusted data: it may set budgets and the model, but it
+		// may not decide whether its own proposed edits run without a human.
+		if cfg.AutoApprovePatches {
+			cfg.AutoApprovePatches = false
+			warnings = append(warnings, "project .metron.json requested auto_approve_patches; ignored -- a project file may not skip patch approval")
+		}
+		if len(cfg.AllowedCommands) > 0 {
+			if optInProjectCommands() {
+				warnings = append(warnings, "project .metron.json grants allowed_commands; you opted in with METRON_ALLOW_PROJECT_COMMANDS")
+			} else {
+				grant := cfg.AllowedCommands
+				cfg.AllowedCommands = []string{}
+				warnings = append(warnings, fmt.Sprintf("project .metron.json requested allowed_commands %v; ignored -- set METRON_ALLOW_PROJECT_COMMANDS to permit them", grant))
+			}
+		}
+	}
+
+	// What actually took effect, from any source, is still worth naming.
+	if cfg.AutoApprovePatches {
+		warnings = append(warnings, "auto_approve_patches is enabled: patches apply without approval")
+	}
+	if len(cfg.AllowedCommands) > 0 {
+		warnings = append(warnings, fmt.Sprintf("allowed_commands is non-empty: the model may run %d command prefix(es)", len(cfg.AllowedCommands)))
+	}
+	return warnings
+}
+
+// optInProjectCommands reports whether the operator explicitly chose to let a
+// project file grant allowed_commands. The opt-in is an environment variable
+// rather than a config field on purpose: a project file could otherwise opt
+// itself in, which would defeat the boundary.
+func optInProjectCommands() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("METRON_ALLOW_PROJECT_COMMANDS"))) {
+	case "1", "true", "yes":
+		return true
+	}
+	return false
 }
 
 // Validate rejects settings that would make the agent misbehave rather than

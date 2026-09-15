@@ -122,8 +122,8 @@ metron -p "which files define Greet?" 2>/dev/null
 ```
 
 There is nobody to answer the approval prompt in this mode, so `apply_patch` fails closed:
-patches are refused unless you pass `--yes` (or set `auto_approve_patches`). `--version` prints
-the build stamp; `-h` lists the flags.
+patches are refused unless you pass `--yes`; `auto_approve_patches` never bypasses this
+one-shot safeguard. `--version` prints the build stamp; `-h` lists the flags.
 
 Type a request at the prompt. Each line is one turn: metron sends it to the model, runs
 whatever tools the model asks for (echoing `[executing: <tool>]` as it goes), and prints the
@@ -252,6 +252,7 @@ Two variables override the file, for one-off runs:
 | `OLLAMA_MODEL` | `model` |
 | `METRON_CONFIG` | which config file is read |
 | `METRON_CONFIG_DIR` | base directory containing `.metron/config.json` |
+| `METRON_ALLOW_PROJECT_COMMANDS` | when `1`/`true`/`yes`, let a project `.metron.json` grant `allowed_commands` |
 
 ```bash
 OLLAMA_MODEL=gemma4:12b-mlx metron
@@ -259,6 +260,23 @@ OLLAMA_MODEL=gemma4:12b-mlx metron
 
 `/config` inside the REPL prints the result of all of this, so you never have to guess which
 layer won.
+
+### Trusting a project's config
+
+The per-project `<repository-root>/.metron.json` is untrusted: a repository can ship one,
+and so it could be used to turn metron loose. It may tune budgets and the model, but it
+**cannot** enable `auto_approve_patches` or grant `allowed_commands`. A project file that
+asks for either is ignored with a warning on stderr at startup and under `--doctor`. To let
+a specific project's `allowed_commands` through for a run, set `METRON_ALLOW_PROJECT_COMMANDS`:
+
+```bash
+METRON_ALLOW_PROJECT_COMMANDS=1 metron
+```
+
+Your own config -- `~/.metron/config.json`, or the file `METRON_CONFIG` names -- is trusted
+and may set either, as may the `OLLAMA_HOST` and `OLLAMA_MODEL` overrides. See
+[SECURITY.md](SECURITY.md) for the full threat model, including the residual risks metron
+does not close.
 
 ### Which tools get offered
 
@@ -358,7 +376,15 @@ asked to find out.
 ```
 
 Choose these entries with the care you would give a sudoers file. `"go"` permits
-`go run ./anything`; `"make"` permits whatever the Makefile does. See [SECURITY.md](SECURITY.md).
+`go run ./anything` and `go generate` directives supplied by the repository; `"make"` permits
+whatever its Makefile recipes do. Allowed commands also inherit the full process environment,
+including exported credentials such as `GITHUB_TOKEN` and `AWS_*` variables. See
+[SECURITY.md](SECURITY.md).
+
+`list_files` follows `.gitignore`, but `view_slice` reads a named path directly, so it can still
+read a gitignored file such as a local `.env` when the model knows its name. Path confinement
+resolves and checks a path before using it; a concurrent symlink swap leaves a residual
+time-of-check-to-time-of-use risk, as described in [SECURITY.md](SECURITY.md).
 
 ## Architecture
 

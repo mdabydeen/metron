@@ -31,6 +31,7 @@ it means the threat model is unusual.
   unwanted is one `git checkout` away.
 - `-p/--prompt` without `--yes` fails closed: nobody is at the keyboard to approve, so
   patches are refused rather than applied unattended.
+- **A project's config file is untrusted.** `<repo>/.metron.json` is data the repository ships, so it may tune budgets and the model but may **not** enable `auto_approve_patches` or grant `allowed_commands`. A project file that asks for either is refused with a warning on stderr at startup and in `--doctor`, and the operator can permit a project's `allowed_commands` for a run by setting `METRON_ALLOW_PROJECT_COMMANDS` to `1` (also accepted: `true`, `yes`). The operator's own config -- `~/.metron/config.json` or the file `METRON_CONFIG` names -- is trusted and may set either, as may the `OLLAMA_HOST` and `OLLAMA_MODEL` environment overrides.
 - `run_command` executes commands in your project. It is **off by default**: with no
   `allowed_commands` set, the tool is not offered to the model at all and its schema is
   not even sent. Turning it on is a deliberate act.
@@ -69,9 +70,11 @@ metron cannot describe in advance, so it is bounded four ways:
   clipped to `max_command_output_bytes`.
 
 Choose allowlist entries with the same care you would give a sudoers file. A
-broad entry is a broad grant: `"go"` permits `go run ./anything`, and `"make"`
-permits whatever the project's Makefile does. Prefer the narrowest prefix that
-does the job.
+broad entry is a broad grant: `"go"` permits `go run ./anything` and, through
+`go generate`, code the repository itself supplies; `"make"` runs whatever the
+project's Makefile says. An allowlisted command is code the repository chose,
+so choose entries with the care you would give a sudoers file and prefer the
+narrowest prefix that does the job.
 
 **Remaining limitations** -- these are real:
 
@@ -85,7 +88,10 @@ does the job.
   an exfiltration channel), and metron warns on stderr whenever the configured
   endpoint is not reached over loopback -- since that is the moment the
   conversation starts leaving the machine, over a transport an attacker may be
-  able to read.
+  able to read. Every redirect an endpoint issues is revalidated the same way: it
+  must retain the original host and scheme, so a different host, an HTTPS-to-HTTP
+  downgrade, or any non-http(s) scheme is refused and a misconfigured or hostile
+  server cannot send the request somewhere else.
 - **Confinement is the project directory, not a sandbox.** Everything inside the
   project is fair game, including files you would rather the model not read.
   There is no per-file policy and no allowlist.
@@ -93,6 +99,20 @@ does the job.
   directory to the project, but the command itself runs with your full user
   privileges and can reach anything you can. Path confinement bounds metron's
   own tools; it cannot bound a program you have permitted to run.
+- **An allowed command runs with your full environment.** `run_command` inherits
+  your process environment as-is, so credentials you export -- a `$GITHUB_TOKEN`,
+  `AWS_*` variables, a login shell's `PATH` -- are visible to anything the model is
+  permitted to run. Path confinement bounds metron's own tools; it does not scrub
+  the environment of a program you allowed.
+- **`list_files` hides gitignored paths, but `view_slice` will still read them.**
+  `list_files` walks with `rg --files` and so skips what your `.gitignore` excludes;
+  `view_slice` reads a named path directly and is not subject to `.gitignore`, so a
+  path a project ignores -- a local `.env`, a scratch file -- is readable by name.
+- **Path confinement is not atomic.** metron resolves a path and checks that it is
+  inside the project, then hands it to `git apply`, and those are two separate steps.
+  A symlink could in principle be swapped between the check and the apply -- the
+  classic time-of-check-to-time-of-use gap. metron's own check and `git apply --check`
+  together make this hard to exploit, but metron does not claim to close it completely.
 - **Prompt injection is not mitigated.** Content in the files metron reads is
   data, but a sufficiently persuasive comment in a source file may influence what
   the model proposes. The approval prompt is the mitigation. Read the diffs.
@@ -107,8 +127,9 @@ approval prompt, and does not claim to.
   endpoint you configure.
 - The endpoint a config names is checked to be an http(s) URL with a host before
   any request is built; a `file://`, `ftp://` or host-less endpoint cannot be
-  turned into a network call, and a non-loopback target is announced on stderr so
-  a config that ships the conversation away is not a silent one.
+  turned into a network call, a non-loopback target is announced on stderr so a
+  config that ships the conversation away is not a silent one, and any redirect the
+  endpoint issues must retain the original host and scheme.
 - No credentials of any kind are read or stored. There is no login and no account.
 - No shell. External binaries (`rg`, `ctags`, `git`) are invoked with an explicit argument
   vector, never through `sh -c`, so a model-supplied string cannot become a shell command.

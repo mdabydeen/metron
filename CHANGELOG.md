@@ -10,6 +10,32 @@ is pre-1.0, the minor version is bumped for breaking changes to configuration or
 
 ### Added
 
+- A project `.metron.json` may no longer raise the operator's privileges. It may
+  tune budgets and the model but may not enable `auto_approve_patches` or grant
+  `allowed_commands`; a file that asks for either is ignored with a warning on
+  stderr at startup and under `--doctor`. The operator can opt a project in with the
+  `METRON_ALLOW_PROJECT_COMMANDS` environment variable.
+- `apply_patch` validates every header form a unified diff carries -- `diff --git`,
+  `rename`, and `copy` in addition to `---`/`+++` -- so no path can slip past the
+  project-boundary check by using a form it did not parse.
+- The Ollama client revalidates every redirect the way it validates the configured
+  endpoint: a hop to a different host or scheme, including an HTTPS-to-HTTP downgrade,
+  is refused, so a redirect cannot send the conversation somewhere the operator did
+  not choose.
+
+### Changed
+
+- One-shot mode (`-p`/`--prompt`) is now fail-closed: without `--yes` patches are
+  refused regardless of config, so `auto_approve_patches` in a project file can no
+  longer apply patches unattended. `--yes` remains the scripted override, and a
+  config may still auto-approve patches in the interactive session where an operator
+  is present to be told about it.
+- `SECURITY.md` and the README document the residual risks metron does not close:
+  a project config is untrusted, an allowed command runs with the full user
+  environment including any exported credentials, `view_slice` reads gitignored
+  files by name even though `list_files` hides them, and the project-boundary check
+  is not atomic against a swapped symlink.
+
 - `metron --doctor` performs a side-effect-free readiness check of configuration,
   local tool dependencies, Ollama connectivity, and model tool support.
 - `max_output_tokens` bounds each model generation (Ollama `num_predict`) instead of
