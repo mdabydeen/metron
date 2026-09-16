@@ -171,7 +171,7 @@ func NewClient(endpoint, model string, opts Options) *Client {
 	if opts.Timeout <= 0 {
 		opts.Timeout = DefaultOptions().Timeout
 	}
-	return &Client{
+	cl := &Client{
 		endpoint: endpoint,
 		model:    model,
 		opts:     opts,
@@ -179,7 +179,39 @@ func NewClient(endpoint, model string, opts Options) *Client {
 		// watchdog in Chat cancels a stalled request instead.
 		http: &http.Client{},
 	}
+	// A redirect is a hop to a host the operator did not point metron at, so
+	// the client revalidates every hop the way it validates the configured
+	// endpoint, keeping the exfiltration surface closed across redirects too.
+	cl.http.CheckRedirect = checkRedirect
+	return cl
 }
+
+// checkRedirect is the guard the client installs on every request. Ollama
+// does not redirect, so any hop is a sign of a misconfigured or hostile
+// endpoint: the guard refuses a hop that leaves the host the operator
+// configured and re-validates the hop's scheme, so a redirect can neither
+// exfiltrate the request to a different host nor smuggle it onto a scheme
+// the endpoint guard already refuses. via[0] is the request metron sent from
+// the configured endpoint, so its host is the one the operator chose; http
+// never calls CheckRedirect with an empty via.
+func checkRedirect(req *http.Request, via []*http.Request) error {
+	if req == nil || req.URL == nil || len(via) == 0 || via[0] == nil || via[0].URL == nil {
+		return errRedirect
+	}
+	if via[0].URL.Host != req.URL.Host || via[0].URL.Scheme != req.URL.Scheme {
+		return errRedirect
+	}
+	if err := endpointAllowed(req.URL, req.URL.String()); err != nil {
+		return errRedirect
+	}
+	return nil
+}
+
+// errRedirect is returned by checkRedirect. The caller wraps it into the
+// same "ollama http post" error as a transport failure, so the model reads
+// a refusal rather than acting on a reply that reached it the long way.
+var errRedirect = errors.New(
+	"redirect refused: it changes the configured host or scheme, or uses a non-http(s) scheme")
 
 func (c *Client) Chat(ctx context.Context, messages []Message, tools []Tool) (*Reply, error) {
 	if err := validateEndpoint(c.endpoint); err != nil {

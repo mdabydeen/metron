@@ -333,6 +333,7 @@ func TestCommandIgnoresPlainInput(t *testing.T) {
 func TestRunMainStartsAndExitsCleanly(t *testing.T) {
 	t.Chdir(t.TempDir())
 	t.Setenv("METRON_CONFIG", "")
+	t.Setenv("METRON_CONFIG_DIR", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("OLLAMA_HOST", "http://127.0.0.1:1/api/chat")
 	t.Setenv("OLLAMA_MODEL", "banner-model")
@@ -682,7 +683,8 @@ func TestExampleConfigMatchesDefaults(t *testing.T) {
 	t.Setenv("OLLAMA_HOST", "")
 	t.Setenv("OLLAMA_MODEL", "")
 
-	cfg, used, err := config.Load()
+	res, err := config.Load()
+	cfg, used := res.Config, res.Path
 	if err != nil {
 		t.Fatalf("config.Load() error = %v, want the example file to load cleanly", err)
 	}
@@ -827,7 +829,7 @@ func TestRunDoctorReportsReadySetup(t *testing.T) {
 	cfg := cfgFor("tool-model")
 	var out, errOut bytes.Buffer
 
-	code := runDoctor(context.Background(), &out, &errOut, cfg, "/tmp/metron.json", testEnv(t),
+	code := runDoctor(context.Background(), &out, &errOut, cfg, "/tmp/metron.json", nil, testEnv(t),
 		fakeProber{info: ollama.ModelInfo{Capabilities: []string{"completion", "tools"}}})
 
 	if code != 0 {
@@ -838,13 +840,16 @@ func TestRunDoctorReportsReadySetup(t *testing.T) {
 			t.Errorf("output = %q, missing %q", out.String(), want)
 		}
 	}
+	if errOut.String() != "" {
+		t.Fatalf("stderr = %q, want safe doctor defaults to stay quiet", errOut.String())
+	}
 }
 
 func TestRunDoctorReportsEveryIssue(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	var out, errOut bytes.Buffer
 
-	code := runDoctor(context.Background(), &out, &errOut, cfgFor("plain-model"), "", testEnv(t),
+	code := runDoctor(context.Background(), &out, &errOut, cfgFor("plain-model"), "", nil, testEnv(t),
 		fakeProber{info: ollama.ModelInfo{Capabilities: []string{"completion"}}})
 
 	if code != 1 {
@@ -860,7 +865,7 @@ func TestRunDoctorReportsEveryIssue(t *testing.T) {
 func TestRunDoctorReportsProbeFailure(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	var out, errOut bytes.Buffer
-	code := runDoctor(context.Background(), &out, &errOut, cfgFor("m"), "", testEnv(t),
+	code := runDoctor(context.Background(), &out, &errOut, cfgFor("m"), "", nil, testEnv(t),
 		fakeProber{err: errors.New("server offline")})
 	if code != 1 || !strings.Contains(out.String(), "ollama: fail (server offline)") {
 		t.Fatalf("runDoctor() = %d, output %q", code, out.String())
@@ -876,7 +881,7 @@ func TestRunDoctorAnnouncesANonLoopbackEndpoint(t *testing.T) {
 	cfg.Endpoint = "http://169.254.169.254:80/api/chat"
 
 	var out, errOut bytes.Buffer
-	runDoctor(context.Background(), &out, &errOut, cfg, "", testEnv(t),
+	runDoctor(context.Background(), &out, &errOut, cfg, "", nil, testEnv(t),
 		fakeProber{info: ollama.ModelInfo{Capabilities: []string{"tools"}}})
 	// The notice is a warning, not a failing check, so it must not appear on the
 	// line-oriented stdout and must not change a result that a missing git repo
@@ -901,6 +906,7 @@ func TestRunMainDoctorUsesOllamaModelProbe(t *testing.T) {
 	}))
 	defer srv.Close()
 	t.Setenv("METRON_CONFIG", "")
+	t.Setenv("METRON_CONFIG_DIR", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("OLLAMA_HOST", srv.URL+"/api/chat")
 	t.Setenv("OLLAMA_MODEL", "doctor-model")
@@ -912,6 +918,54 @@ func TestRunMainDoctorUsesOllamaModelProbe(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "ollama: ok") || !strings.Contains(out.String(), "doctor-model") {
 		t.Fatalf("stdout = %q, want successful model probe", out.String())
+	}
+}
+
+func TestRunMainDoctorWarnsForProjectPrivilegeAttempts(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	t.Setenv("PATH", t.TempDir())
+	if err := os.WriteFile(config.ProjectFile, []byte(`{"auto_approve_patches":true,"allowed_commands":["go test"]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/show" {
+			t.Errorf("path = %q, want /api/show", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"capabilities":["tools"]}`))
+	}))
+	defer srv.Close()
+	t.Setenv("METRON_CONFIG", "")
+	t.Setenv("METRON_CONFIG_DIR", t.TempDir())
+	t.Setenv("OLLAMA_HOST", srv.URL+"/api/chat")
+	t.Setenv("OLLAMA_MODEL", "doctor-model")
+
+	var out, errOut bytes.Buffer
+	code := runMain([]string{"--doctor"}, strings.NewReader(""), &out, &errOut)
+
+	if code != 1 {
+		t.Fatalf("runMain(--doctor) = %d, want 1 because the scratch project lacks tool binaries; stdout: %s", code, out.String())
+	}
+	joined := errOut.String()
+	for _, want := range []string{
+		"warning:",
+		"requested auto_approve_patches",
+		"requested allowed_commands",
+		"METRON_ALLOW_PROJECT_COMMANDS",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("stderr = %q, want doctor warning containing %q", joined, want)
+		}
+	}
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(joined, "source: "+filepath.Join(realDir, config.ProjectFile)) {
+		t.Errorf("stderr = %q, want the canonical project config source", joined)
+	}
+	if strings.Contains(out.String(), "requested auto_approve_patches") || strings.Contains(out.String(), "requested allowed_commands") {
+		t.Fatalf("stdout = %q, want project privilege warnings kept on stderr", out.String())
 	}
 }
 
@@ -948,6 +1002,7 @@ func oneShotServer(t *testing.T, script []string) {
 	}))
 	t.Cleanup(srv.Close)
 	t.Setenv("METRON_CONFIG", "")
+	t.Setenv("METRON_CONFIG_DIR", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("OLLAMA_HOST", srv.URL+"/api/chat")
 	t.Setenv("OLLAMA_MODEL", "one-shot-model")
@@ -1149,5 +1204,135 @@ func TestApproveOnEOFNamesWhatWasNotDone(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "command not run") {
 		t.Fatalf("approve() output = %q, want the refusal to name the kind", out.String())
+	}
+}
+
+// TestRunMainOneShotRefusesProjectAutoApprove is the P3 regression: a project
+// .metron.json may not auto-approve patches, and one-shot without --yes fails
+// closed no matter what the config says.
+func TestRunMainOneShotRefusesProjectAutoApprove(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	writeGitRepoForTest(t)
+	// A project file that tries to auto-approve must not bypass the one-shot contract.
+	if err := os.WriteFile(config.ProjectFile, []byte(`{"auto_approve_patches":true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	diff := "--- a/target.txt\n+++ b/target.txt\n@@ -1 +1 @@\n-alpha\n+omega\n"
+	oneShotServer(t, []string{
+		`{"message":{"role":"assistant","tool_calls":[{"function":{"name":"apply_patch","arguments":` +
+			mustJSONMain(t, map[string]any{"diff": diff}) + `}}]},"done":true}`,
+		`{"message":{"role":"assistant","content":"I would change target.txt."},"done":true}`,
+	})
+
+	var out, errOut bytes.Buffer
+	code := runMain([]string{"-p", "change it"}, strings.NewReader(""), &out, &errOut)
+
+	if code != 0 {
+		t.Fatalf("runMain(-p) = %d, want 0", code)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "target.txt"))
+	if err != nil || string(b) != "alpha\n" {
+		t.Fatalf("target.txt = %q (err %v), want the project auto_approve ignored", b, err)
+	}
+	if !strings.Contains(errOut.String(), "requested auto_approve_patches") {
+		t.Fatalf("stderr = %q, want the project-file privilege attempt named", errOut.String())
+	}
+}
+
+// TestRunMainInteractiveAutoApprovesPatchesFromConfig proves the approval order
+// still lets an operator-level auto_approve apply without a prompt, so the P3 fix
+// did not disable auto-approval wholesale.
+func TestRunMainInteractiveAutoApprovesPatchesFromConfig(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	writeGitRepoForTest(t)
+	explicit := filepath.Join(dir, "explicit.json")
+	if err := os.WriteFile(explicit, []byte(`{"auto_approve_patches":true,"allowed_commands":["go test"]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	diff := "--- a/target.txt\n+++ b/target.txt\n@@ -1 +1 @@\n-alpha\n+omega\n"
+	oneShotServer(t, []string{
+		`{"message":{"role":"assistant","tool_calls":[{"function":{"name":"apply_patch","arguments":` +
+			mustJSONMain(t, map[string]any{"diff": diff}) + `}}]},"done":true}`,
+		`{"message":{"role":"assistant","content":"Changed target.txt."},"done":true}`,
+	})
+	t.Setenv("METRON_CONFIG", explicit)
+
+	var out, errOut bytes.Buffer
+	// No --yes and interactive: a config auto_approve applies the patch without a prompt.
+	code := runMain(nil, strings.NewReader("change it\nexit\n"), &out, &errOut)
+
+	if code != 0 {
+		t.Fatalf("runMain() = %d, want 0", code)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "target.txt"))
+	if err != nil || string(b) != "omega\n" {
+		t.Fatalf("target.txt = %q (err %v), want the patch applied via config auto-approve", b, err)
+	}
+	for _, want := range []string{
+		"auto_approve_patches is enabled",
+		"allowed_commands is non-empty",
+		"source: " + explicit,
+	} {
+		if !strings.Contains(errOut.String(), want) {
+			t.Errorf("stderr = %q, want the enabled-capability warning %q", errOut.String(), want)
+		}
+	}
+}
+
+// TestRunMainWarnsWhenProjectFileRequestsPrivilege pins P2: a project file that
+// tries to raise privileges is announced on stderr even though it was ignored.
+func TestRunMainWarnsWhenProjectFileRequestsPrivilege(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	writeGitRepoForTest(t)
+	if err := os.WriteFile(config.ProjectFile, []byte(`{"auto_approve_patches":true,"allowed_commands":["go test"]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errOut bytes.Buffer
+	// "exit" returns before any request, so no model is needed.
+	code := runMain(nil, strings.NewReader("exit\n"), &out, &errOut)
+
+	if code != 0 {
+		t.Fatalf("runMain() = %d, want 0", code)
+	}
+	joined := errOut.String()
+	for _, want := range []string{"requested auto_approve_patches", "requested allowed_commands", "METRON_ALLOW_PROJECT_COMMANDS"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("stderr = %q, want the project-file privilege attempt named: %q", joined, want)
+		}
+	}
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(joined, "source: "+filepath.Join(realDir, config.ProjectFile)) {
+		t.Errorf("stderr = %q, want the canonical project config source", joined)
+	}
+	if strings.Contains(out.String(), "requested auto_approve_patches") || strings.Contains(out.String(), "requested allowed_commands") {
+		t.Fatalf("stdout = %q, want project privilege warnings kept on stderr", out.String())
+	}
+}
+
+// TestRunDoctorEmitsCapabilityWarnings pins the doctor's half of P2: the
+// capability notices a config produces land on stderr alongside the endpoint notice.
+func TestRunDoctorEmitsCapabilityWarnings(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	var out, errOut bytes.Buffer
+	warnings := []string{"auto_approve_patches is enabled", "allowed_commands is non-empty"}
+
+	code := runDoctor(context.Background(), &out, &errOut, cfgFor("m"), "/tmp/metron.json", warnings, testEnv(t),
+		fakeProber{info: ollama.ModelInfo{Capabilities: []string{"tools"}}})
+
+	if code != 1 {
+		t.Fatalf("runDoctor() = %d, want 1 (no tools on PATH)", code)
+	}
+	joined := errOut.String()
+	for _, want := range []string{"auto_approve_patches is enabled", "allowed_commands is non-empty", "source: /tmp/metron.json"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("stderr = %q, want the capability warning: %q", joined, want)
+		}
 	}
 }
