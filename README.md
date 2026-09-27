@@ -570,6 +570,17 @@ and not to retry, it tried once, fell back to `view_slice`, and finished the job
 See the [project maturity audit and roadmap](PROJECT_AUDIT.md) for prioritized gaps, and
 [CHANGELOG.md](CHANGELOG.md) for what has landed.
 
+## Evaluate the boundary with a team
+
+If your team is reviewing how an AI-assisted change should be authorised, the public
+[Stopline team evaluation guide](https://github.com/mdabydeen/stopline/blob/main/docs/team-evaluation-guide.md)
+walks through one allow, ask, or block decision with explicit evidence and recovery ownership.
+The free [AI-assisted code review kit](https://michaeldabydeen.com/resources/review-kit.zip)
+provides a separate exercise, worked answer, worksheet, and facilitator guide. Teams that want
+facilitated discussion can read the proposed [private workshop scope](https://michaeldabydeen.com/workshops/ai-assisted-code-review).
+These are evaluation and teaching resources; they do not establish Metron production readiness,
+support, or certification.
+
 ## Contributing
 
 Bug reports and pull requests are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) first:
