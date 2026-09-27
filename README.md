@@ -69,6 +69,12 @@ The test suite needs none of these — see [Testing](#testing).
 
 ## Install
 
+To try a published binary, open the [latest release](https://github.com/mdabydeen/metron/releases/latest)
+and choose the archive for your platform: `darwin_arm64`, `darwin_amd64`, `linux_arm64`, or
+`linux_amd64`. Each archive includes the `metron` binary and its runtime documentation.
+
+For a source-based install:
+
 ```bash
 go install github.com/mdabydeen/metron/cmd/metron@latest
 ```
