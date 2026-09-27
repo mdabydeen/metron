@@ -58,7 +58,15 @@ the table. The tool surface is what makes that instruction enforceable rather th
 - **[ripgrep](https://github.com/BurntSushi/ripgrep)** (`rg`) — required by `search_text`.
 - **[Universal Ctags](https://ctags.io)** — required by `find_symbol`. The BSD `ctags`
   shipped with macOS/Xcode does **not** work; it rejects the `--fields=+nK` flag metron
-  relies on. `brew install universal-ctags`, and make sure it comes first on `PATH`.
+  relies on. Install it with Homebrew and put its binary directory first on `PATH`:
+
+  ```bash
+  brew install universal-ctags
+  export PATH="$(brew --prefix universal-ctags)/bin:$PATH"
+  ```
+
+  The `export` applies to the current shell; add the same line to your shell profile if you
+  want it to apply to future sessions.
 - **git**, since `apply_patch` edits your files with `git apply`.
 
 metron checks all of this at startup and prints a warning per problem, naming the tool that
