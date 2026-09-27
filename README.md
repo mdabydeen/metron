@@ -89,8 +89,9 @@ configuration, required local binaries, Ollama connectivity, the configured mode
 whether that model advertises tool support. It performs no inference and exits non-zero
 when the setup is incomplete, so it is also suitable for bootstrap scripts.
 
-Release archives include SPDX SBOMs and GitHub build-provenance attestations. After
-downloading an archive, verify its origin with:
+Release archives include SPDX SBOMs. The release workflow is also configured to publish GitHub
+build-provenance attestations; verify that an attestation is present for a specific release before
+using the command below:
 
 ```bash
 gh attestation verify metron_<version>_<os>_<arch>.tar.gz --repo mdabydeen/metron
