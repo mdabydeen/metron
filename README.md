@@ -1,6 +1,7 @@
 # metron
 
 [![CI](https://github.com/mdabydeen/metron/actions/workflows/ci.yml/badge.svg)](https://github.com/mdabydeen/metron/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/mdabydeen/metron?display_name=tag&sort=semver)](https://github.com/mdabydeen/metron/releases/latest)
 [![Go Reference](https://pkg.go.dev/badge/github.com/mdabydeen/metron.svg)](https://pkg.go.dev/github.com/mdabydeen/metron)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/mdabydeen/metron/badge)](https://scorecard.dev/viewer/?uri=github.com/mdabydeen/metron)
