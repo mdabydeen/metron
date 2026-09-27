@@ -46,13 +46,9 @@ is pre-1.0, the minor version is bumped for breaking changes to configuration or
   part of every statically linked metron binary.
 - `go install github.com/mdabydeen/metron/cmd/metron@latest` now works: the module has a
   resolvable path and the command lives under `cmd/metron`.
-- Homebrew installs via a cask rather than a formula, following GoReleaser's deprecation of
-  `brews`. Casks are macOS-only, so Linux users install with `go install` or the release
-  tarball. The cask strips the Gatekeeper quarantine attribute on install, without which an
-  unsigned binary fails its first run.
 - Apache-2.0 license, contributor guide, security policy and code of conduct.
-- Prebuilt binaries for macOS and Linux on amd64 and arm64, published on tag, with a
-  Homebrew tap.
+- Prebuilt binaries for macOS and Linux on amd64 and arm64, published on tag as release
+  archives with checksums and SPDX SBOMs.
 - CI enforces the project's two standing invariants: 100% statement coverage, and a
   hermetic default test suite.
 - Tools are confined to the project directory. Every path is resolved against the enclosing
@@ -97,7 +93,7 @@ is pre-1.0, the minor version is bumped for breaking changes to configuration or
   budget at all; the pattern now follows a `--` separator. `list_files` passes its glob as
   `--glob=<pattern>` for the same reason.
 
-## [0.1.0] — unreleased
+## [0.1.0] — 2026-09-27
 
 First tagged release. Everything below was developed before the changelog existed.
 
