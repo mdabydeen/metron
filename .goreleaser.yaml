@@ -94,6 +94,9 @@ release:
 # Linux users install with `go install` or the tarball rather than with brew.
 homebrew_casks:
   - name: metron
+    # Keep the release publishable when the optional tap token is not configured.
+    # The cask can be enabled later by setting HOMEBREW_TAP_TOKEN.
+    skip_upload: '{{ not (isEnvSet "HOMEBREW_TAP_TOKEN") }}'
     repository:
       owner: mdabydeen
       name: homebrew-tap
