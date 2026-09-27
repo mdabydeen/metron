@@ -87,6 +87,22 @@ For a source-based install:
 go install github.com/mdabydeen/metron/cmd/metron@latest
 ```
 
+After downloading a release archive, extract the `metron` binary and put it on your
+`PATH`. Replace the archive name with the one for your platform:
+
+```bash
+ARCHIVE=metron_0.1.0_darwin_arm64.tar.gz
+mkdir -p "$HOME/.local/bin"
+tar -xzf "$ARCHIVE"
+install -m 0755 metron "$HOME/.local/bin/metron"
+export PATH="$HOME/.local/bin:$PATH"
+metron --version
+metron --doctor
+```
+
+The archive names use the pattern `metron_<version>_<os>_<arch>.tar.gz`; the release page
+contains the matching Darwin and Linux variants.
+
 Or build from a clone:
 
 ```bash
