@@ -602,6 +602,12 @@ Metron is early, and compatibility depends on the local model and environment. U
 [Q&A discussion](https://github.com/mdabydeen/metron/discussions/21) to share the model,
 hardware, `metron --doctor` result, task, and any tool or patch-approval issue you observed.
 
+As one maintainer smoke check, `gemma4:12b-mlx` on macOS arm64 with a local Ollama server
+returned `doctor: ready` after Universal Ctags was placed first on `PATH`. A no-write
+`list_files` request then confirmed that the repository-root `README.md` existed. This is one
+setup and one task; it does not establish general compatibility, performance, support, or
+production readiness.
+
 Please report reproducible defects through [GitHub Issues](https://github.com/mdabydeen/metron/issues)
 and security concerns through [SECURITY.md](SECURITY.md).
 
