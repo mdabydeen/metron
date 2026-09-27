@@ -581,6 +581,15 @@ facilitated discussion can read the proposed [private workshop scope](https://mi
 These are evaluation and teaching resources; they do not establish Metron production readiness,
 support, or certification.
 
+## Community feedback
+
+Metron is early, and compatibility depends on the local model and environment. Use the public
+[Q&A discussion](https://github.com/mdabydeen/metron/discussions/21) to share the model,
+hardware, `metron --doctor` result, task, and any tool or patch-approval issue you observed.
+
+Please report reproducible defects through [GitHub Issues](https://github.com/mdabydeen/metron/issues)
+and security concerns through [SECURITY.md](SECURITY.md).
+
 ## Contributing
 
 Bug reports and pull requests are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) first:
