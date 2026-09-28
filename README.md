@@ -35,6 +35,8 @@ metron > make Greet return "hola" instead of "hello"
 Greet now returns "hola" (greet.go:4).
 ```
 
+For a detailed evaluation sequence and discussion guide, read the [Metron evaluation brief](docs/evaluation-brief.md).
+
 ## Why
 
 A 32B model on a laptop has a finite context window, and the fastest way to waste it is to
