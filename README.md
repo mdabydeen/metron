@@ -14,6 +14,11 @@ purged from the conversation as soon as the turn that needed it is over.
 The name is the Greek *metron* — a measure. That is the whole design: measure what the model
 is allowed to see.
 
+For the reasoning behind the boundary, read [A Local-First Coding Agent Needs a Measurable
+Boundary](https://michaeldabydeen.com/articles/a-local-first-coding-agent-needs-a-measurable-boundary).
+The article explains the design and its limits; the repository and release assets remain the
+authoritative source for the implementation.
+
 ```
 === metron (model: qwen3.8:27b-mlx) ===
 Context-disciplined terminal coder. /help for commands, /exit to quit.
