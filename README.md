@@ -108,6 +108,31 @@ metron --version
 metron --doctor
 ```
 
+Run the first check from inside a Git repository. The project boundary is part of
+metron's safety model, so `--doctor` reports `the project is not a git repository`
+when it is run from a temporary directory or a folder outside a repository. Start with
+the repository you want to inspect, then run the check there:
+
+```bash
+cd ~/code/my-project
+metron --doctor
+```
+
+If the check reports that the configured model is missing, list the models available to
+your Ollama server and set `model` in `.metron.json` (or in the home configuration file)
+to one that advertises tool support:
+
+```bash
+ollama list
+cp metron.example.json .metron.json
+# edit .metron.json, then check again
+metron --doctor
+```
+
+The built-in model name is a placeholder. `--doctor` does not download a model or make
+an inference request; it reports the missing setup so you can choose the model and
+project deliberately.
+
 The archive names use the pattern `metron_<version>_<os>_<arch>.tar.gz`; the release page
 contains the matching Darwin and Linux variants.
 
