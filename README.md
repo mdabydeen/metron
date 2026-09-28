@@ -17,7 +17,10 @@ is allowed to see.
 For the reasoning behind the boundary, read [A Local-First Coding Agent Needs a Measurable
 Boundary](https://michaeldabydeen.com/articles/a-local-first-coding-agent-needs-a-measurable-boundary).
 The article explains the design and its limits; the repository and release assets remain the
-authoritative source for the implementation.
+authoritative source for the implementation. If you are evaluating review practices for
+agent-assisted changes rather than building a local tool, the [free AI-assisted code review
+kit](https://michaeldabydeen.com/resources/review-kit.zip) provides a separate bounded exercise,
+worked answer, and worksheet. It is complete without a subscription.
 
 ```
 === metron (model: qwen3.8:27b-mlx) ===
